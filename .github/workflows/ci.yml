@@ -1,4 +1,4 @@
-name: SDK PR checks
+name: SDK PR
 
 on:
   pull_request:
