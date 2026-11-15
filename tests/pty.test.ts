@@ -7,12 +7,42 @@ import { createAppServerContext } from '../src/server/index.js';
 import type { OutputFrame, Pty } from '../src/server/index.js';
 
 type Request = { id: string; method: string; params: any; socket: WebSocket };
-function channel<T>() {
+function channel<T>(t: TestContext) {
   const values: T[] = [];
-  const waiters: ((value: T) => void)[] = [];
+  const waiters = new Set<{ resolve(value: T): void; reject(error: unknown): void }>();
+  let closed: Error | undefined;
+  const close = () => {
+    closed ??= new Error('Test channel closed');
+    values.length = 0;
+    for (const waiter of [...waiters]) waiter.reject(closed);
+  };
+  t.after(close);
   return {
-    push(value: T) { const waiter = waiters.shift(); if (waiter) waiter(value); else values.push(value); },
-    next(): Promise<T> { return values.length ? Promise.resolve(values.shift()!) : new Promise(resolve => waiters.push(resolve)); },
+    push(value: T) {
+      if (closed) return;
+      const waiter = waiters.values().next().value;
+      if (waiter) waiter.resolve(value); else values.push(value);
+    },
+    next(signal?: AbortSignal): Promise<T> {
+      const pending = new Promise<T>((resolve, reject) => {
+        const cleanup = () => { waiters.delete(waiter); signal?.removeEventListener('abort', abort); };
+        const waiter = {
+          resolve(value: T) { cleanup(); resolve(value); },
+          reject(error: unknown) { cleanup(); reject(error); },
+        };
+        const abort = () => waiter.reject(signal?.reason);
+        if (closed) { reject(closed); return; }
+        if (signal?.aborted) { reject(signal.reason); return; }
+        if (values.length) { resolve(values.shift()!); return; }
+        waiters.add(waiter);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+      // Teardown can reject a waiter whose test body has already been cancelled.
+      // Keep the returned promise rejected for its caller, but observe it now.
+      void pending.catch(() => {});
+      return pending;
+    },
+    close,
   };
 }
 interface PeerOptions {
@@ -21,25 +51,49 @@ interface PeerOptions {
   manualKeepalive?: boolean;
   admit?(attempt: number): boolean;
 }
-async function peer(options: PeerOptions = {}) {
+async function peer(t: TestContext, options: PeerOptions = {}) {
   let upgrades = 0;
+  let stopping = false;
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0,
-    verifyClient: (_info, done) => done(options.admit?.(++upgrades) ?? true, 503),
+    verifyClient: (_info, done) => done(!stopping && (options.admit?.(++upgrades) ?? true), 503),
   });
   await once(server, 'listening');
   const address = server.address();
   if (typeof address === 'string' || !address) throw new Error('test address missing');
-  const calls = channel<Request>();
+  const calls = channel<Request>(t);
   const requests: Request[] = [];
   const connections: WebSocket[] = [];
   const creates = new Map<string, { params: string; session_id: string }>();
   const sessions = new Set<string>();
   const streams = new Map<WebSocket, Map<string, string>>();
   const ids = new Set<string>();
+  const endpoint = `ws://127.0.0.1:${address.port}/apps/host`;
+  const clients = new Map<WebSocket, Promise<void>>();
+  const serverClosed = new Map<WebSocket, Promise<void>>();
+  const clientForServer = new Map<WebSocket, WebSocket>();
+  const emit = WebSocket.prototype.emit;
+  t.mock.method(WebSocket.prototype, 'emit', function(this: WebSocket, event: string | symbol, ...args: any[]) {
+    // Positive identity: only clients of this peer's unique listening endpoint.
+    if (this.url === endpoint) {
+      if (!clients.has(this)) {
+        let closed!: () => void;
+        clients.set(this, new Promise<void>(resolve => { closed = resolve; }));
+        this.once('close', () => closed());
+      }
+      if (event === 'message') {
+        const message = JSON.parse(args[0].toString());
+        const request = requests.find(request => request.id === message.id);
+        if (request) clientForServer.set(request.socket, this);
+      }
+      if (stopping && (this.readyState === WebSocket.OPEN || this.readyState === WebSocket.CONNECTING)) this.terminate();
+    }
+    return emit.call(this, event, ...args);
+  });
   server.on('connection', (socket, upgrade) => {
     assert.equal(upgrade.headers.authorization, `Bearer ${'b'.repeat(64)}`);
     assert.equal(upgrade.headers.origin, undefined);
     connections.push(socket);
+    serverClosed.set(socket, new Promise(resolve => socket.once('close', () => resolve())));
     streams.set(socket, new Map());
     socket.on('close', () => streams.delete(socket));
     socket.on('message', raw => {
@@ -90,12 +144,45 @@ async function peer(options: PeerOptions = {}) {
   const app = await createAppServerContext({
     appData: '/data',
     bootstrap: { execution_id: 'execution_fixture_001', ui_proxy: { credential: 'a'.repeat(64) },
-      host_api: { endpoint: `ws://127.0.0.1:${address.port}/apps/host`, credential: 'b'.repeat(64), capabilities: ['host.pty'] } },
+      host_api: { endpoint, credential: 'b'.repeat(64), capabilities: ['host.pty'] } },
   });
-  return { app, calls, requests, connections, streams, async close() {
+  let serverStopped: Promise<void> | undefined;
+  const drain = async () => {
+    if (!stopping) {
+      stopping = true;
+      calls.close();
+      serverStopped = new Promise<void>(resolve => server.close(() => resolve()));
+      for (const socket of [...clients.keys(), ...connections]) {
+        if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+      }
+    }
+    await Promise.all([...clients.values(), ...serverClosed.values(), serverStopped]);
+  };
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= (async () => {
     try { await app.close(); }
-    finally { for (const socket of server.clients) socket.terminate(); await new Promise<void>(resolve => server.close(() => resolve())); }
-  } };
+    finally { await drain(); }
+  })();
+  t.after(async () => {
+    const bodyOwnsClose = closing !== undefined;
+    const result = close().then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+    // Also run when a failed/cancelled body is stuck awaiting a mock reply.
+    await drain();
+    const settled = await result;
+    // Include any handshake that was already queued when teardown started.
+    // Once SDK close settles it can no longer create a replacement socket.
+    await drain();
+    if (!bodyOwnsClose && !settled.ok) throw settled.error;
+  });
+  return { app, calls, requests, connections, streams, close,
+    async disconnect(request: Request) {
+      const client = clientForServer.get(request.socket);
+      assert.ok(client, 'connection must have a correlated RPC response');
+      const closed = clients.get(client)!;
+      request.socket.terminate();
+      await Promise.all([closed, serverClosed.get(request.socket)!]);
+    },
+  };
 }
 function reply(request: Request, result: unknown) {
   request.socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
@@ -113,11 +200,11 @@ function reject(request: Request, code: string) {
   request.socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32001, message: code } }));
 }
 
-test('explicit consumption, reconnect cursor, old receipts and unsubscribe ownership', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('explicit consumption, reconnect cursor, old receipts and unsubscribe ownership', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24, command: ['/bin/sh'], cwd: '/tmp' });
-    const frames = channel<OutputFrame>();
+    const frames = channel<OutputFrame>(t);
     const errors: unknown[] = [];
     const opening = terminal.subscribe({ onOutput: frame => frames.push(frame), onError: error => errors.push(error) });
     const first = await p.calls.next();
@@ -154,8 +241,8 @@ test('explicit consumption, reconnect cursor, old receipts and unsubscribe owner
   } finally { await p.close(); }
 });
 
-test('unknown input is never replayed and blocks later writes; queued capacity is finite', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('unknown input is never replayed and blocks later writes; queued capacity is finite', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const first = terminal.write('dangerous');
@@ -170,8 +257,8 @@ test('unknown input is never replayed and blocks later writes; queued capacity i
   } finally { await p.close(); }
 });
 
-test('cancelled unsent input does not occupy the next sequence; sent cancellation is ambiguous', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('cancelled unsent input does not occupy the next sequence; sent cancellation is ambiguous', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const queuedAbort = new AbortController();
@@ -193,8 +280,8 @@ test('cancelled unsent input does not occupy the next sequence; sent cancellatio
   } finally { await p.close(); }
 });
 
-test('cursor loss preserves Gateway error code instead of skipping output', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('cursor loss preserves Gateway error code instead of skipping output', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const subscription = terminal.subscribe({ after: 17, onOutput() { assert.fail('lost output delivered'); }, onError() {} });
@@ -205,11 +292,11 @@ test('cursor loss preserves Gateway error code instead of skipping output', { ti
   } finally { await p.close(); }
 });
 
-test('output without consumption is bounded and stream cancellation does not kill the PTY', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('output without consumption is bounded and stream cancellation does not kill the PTY', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
-    const errors = channel<unknown>();
+    const errors = channel<unknown>(t);
     const abort = new AbortController();
     let callbacks = 0;
     const pending = terminal.subscribe({ signal: abort.signal, onOutput() { callbacks++; }, onError: error => errors.push(error) });
@@ -237,13 +324,13 @@ test('output without consumption is bounded and stream cancellation does not kil
   } finally { await p.close(); }
 });
 
-test('unsubscribing A preserves pending input and the existing stream of distinct PTY B', { timeout: 5000 }, async () => {
-  const p = await peer();
+test('unsubscribing A preserves pending input and the existing stream of distinct PTY B', { timeout: 5000 }, async t => {
+  const p = await peer(t);
   try {
     const a = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const b = await p.app.host.pty.create({ cols: 80, rows: 24 });
     assert.notEqual(a.id, b.id);
-    const aFrames = channel<OutputFrame>(), bFrames = channel<OutputFrame>();
+    const aFrames = channel<OutputFrame>(t), bFrames = channel<OutputFrame>(t);
     let callbacksA = 0;
     const errors: unknown[] = [];
     const openingA = a.subscribe({ onOutput: frame => { callbacksA++; aFrames.push(frame); }, onError: error => errors.push(error) });
@@ -272,7 +359,7 @@ test('unsubscribing A preserves pending input and the existing stream of distinc
     reply(nextInput, { accepted_sequence: 2 }); await nextWrite;
     assert.equal(p.connections.length, 1);
     assert.equal(p.requests.filter(r => r.method === 'host.pty.subscribe' && r.params.session_id === b.id).length, 1);
-    const replacementFrames = channel<OutputFrame>();
+    const replacementFrames = channel<OutputFrame>(t);
     const replacing = a.subscribe({ onOutput: frame => replacementFrames.push(frame), onError: error => errors.push(error) });
     const replacement = await p.calls.next(); reply(replacement, { subscribed: true, window: 65536 });
     await replacing;
@@ -310,10 +397,10 @@ function synchronousAckBurst(t: TestContext) {
 
 test('confirmed partial ACK grants byte credit before a synchronous next-output burst', { timeout: 5000 }, async t => {
   const bursts = synchronousAckBurst(t);
-  const p = await peer();
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
-    const frames = channel<OutputFrame>(), errors: unknown[] = [];
+    const frames = channel<OutputFrame>(t), errors: unknown[] = [];
     const pending = terminal.subscribe({ onOutput: frame => frames.push(frame), onError: error => errors.push(error) });
     const stream = await p.calls.next(); reply(stream, { subscribed: true, window: 65536 });
     const sub = await pending;
@@ -338,10 +425,10 @@ test('confirmed partial ACK grants byte credit before a synchronous next-output 
 
 test('partial cumulative ACK retains remaining outstanding frames and rejects a true 65th data frame', { timeout: 5000 }, async t => {
   const bursts = synchronousAckBurst(t);
-  const p = await peer();
+  const p = await peer(t);
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
-    const frames = channel<OutputFrame>(), errors = channel<unknown>();
+    const frames = channel<OutputFrame>(t), errors = channel<unknown>(t);
     const pending = terminal.subscribe({ onOutput: frame => frames.push(frame), onError: error => errors.push(error) });
     const stream = await p.calls.next(); reply(stream, { subscribed: true, window: 65536 }); await pending;
     for (let i = 0; i < 64; i++) output(stream, i, [65]);
@@ -360,9 +447,19 @@ test('partial cumulative ACK retains remaining outstanding frames and rejects a 
 
 async function barrier(terminal: Pty, calls: ReturnType<typeof channel<Request>>) {
   const operation = terminal.resize({ cols: 80, rows: 24 });
-  const request = await calls.next();
-  assert.equal(request.method, 'host.pty.resize');
-  reply(request, { resized: true }); await operation;
+  const outcome = operation.then(() => ({ kind: 'completed' as const }), error => ({ kind: 'failed' as const, error }));
+  const waiting = new AbortController();
+  try {
+    const first = await Promise.race([
+      calls.next(waiting.signal).then(request => ({ kind: 'request' as const, request })),
+      outcome,
+    ]);
+    if (first.kind === 'failed') throw first.error;
+    if (first.kind !== 'request') throw new Error('resize completed without its peer request');
+    assert.equal(first.request.method, 'host.pty.resize');
+    reply(first.request, { resized: true });
+    await operation;
+  } finally { waiting.abort(); }
 }
 
 // Only SDK heartbeat intervals are advanced; real RPC timeout/handshake timers
@@ -385,14 +482,7 @@ function heartbeatClock(t: TestContext) {
 
 test('temporary keepalive error and transport loss recover without replacing the shell', { timeout: 5000 }, async t => {
   const clock = heartbeatClock(t);
-  const p = await peer({ manualKeepalive: true });
-  const disconnected = channel<void>();
-  const emit = WebSocket.prototype.emit;
-  t.mock.method(WebSocket.prototype, 'emit', function(this: WebSocket, event: string | symbol, ...args: any[]) {
-    const result = emit.call(this, event, ...args);
-    if (event === 'close' && !p.connections.includes(this)) disconnected.push(undefined);
-    return result;
-  });
+  const p = await peer(t, { manualKeepalive: true });
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     clock.tick(10000);
@@ -401,8 +491,7 @@ test('temporary keepalive error and transport loss recover without replacing the
     await barrier(terminal, p.calls);
     clock.tick(10000);
     const second = await p.calls.next(); assert.equal(second.method, 'host.pty.keepalive');
-    second.socket.terminate();
-    await disconnected.next();
+    await p.disconnect(second);
     await barrier(terminal, p.calls);
     clock.tick(10000);
     const third = await p.calls.next(); assert.equal(third.method, 'host.pty.keepalive');
@@ -420,15 +509,17 @@ test('temporary keepalive error and transport loss recover without replacing the
 
 test('local request capacity does not turn a missed heartbeat into permanent PTY failure', { timeout: 5000 }, async t => {
   const clock = heartbeatClock(t);
-  const p = await peer({ manualKeepalive: true });
+  const p = await peer(t, { manualKeepalive: true });
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const operations = Array.from({ length: 64 }, () => terminal.resize({ cols: 80, rows: 24 }));
+    const completed = Promise.all(operations);
+    void completed.catch(() => {}); // Observe teardown failures before all requests arrive.
     const pending: Request[] = [];
     for (let i = 0; i < 64; i++) pending.push(await p.calls.next());
     clock.tick(10000);
     for (const request of pending) reply(request, { resized: true });
-    await Promise.all(operations);
+    await completed;
     await barrier(terminal, p.calls);
     clock.tick(10000);
     const heartbeat = await p.calls.next(); assert.equal(heartbeat.method, 'host.pty.keepalive');
@@ -439,10 +530,10 @@ test('local request capacity does not turn a missed heartbeat into permanent PTY
 for (const error of ['host.session_expired', 'host.session_unavailable', 'host.revoked']) {
   test(`definitive keepalive ${error} stops delivery, heartbeat and future operations`, { timeout: 5000 }, async t => {
     const clock = heartbeatClock(t);
-    const p = await peer({ manualKeepalive: true });
+    const p = await peer(t, { manualKeepalive: true });
     try {
       const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
-      const errors = channel<unknown>();
+      const errors = channel<unknown>(t);
       const pending = terminal.subscribe({ onOutput() {}, onError: value => errors.push(value) });
       const stream = await p.calls.next(); reply(stream, { subscribed: true, window: 65536 }); await pending;
       clock.tick(10000);
@@ -463,10 +554,10 @@ for (const error of ['host.session_expired', 'host.session_unavailable', 'host.r
 
 test('three consecutive transient heartbeat failures exhaust a finite recovery budget', { timeout: 5000 }, async t => {
   const clock = heartbeatClock(t);
-  const p = await peer({ manualKeepalive: true });
+  const p = await peer(t, { manualKeepalive: true });
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
-    const errors = channel<unknown>();
+    const errors = channel<unknown>(t);
     const pending = terminal.subscribe({ onOutput() {}, onError: error => errors.push(error) });
     const stream = await p.calls.next(); reply(stream, { subscribed: true, window: 65536 }); await pending;
     for (let i = 0; i < 3; i++) {
@@ -482,8 +573,8 @@ test('three consecutive transient heartbeat failures exhaust a finite recovery b
   } finally { await p.close(); }
 });
 
-test('unknown create remains uncertain when retry cannot connect and send', { timeout: 5000 }, async () => {
-  const p = await peer({ admit: attempt => attempt === 1, create: request => request.socket.terminate() });
+test('unknown create remains uncertain when retry cannot connect and send', { timeout: 5000 }, async t => {
+  const p = await peer(t, { admit: attempt => attempt === 1, create: request => request.socket.terminate() });
   try {
     await assert.rejects(p.app.host.pty.create({ cols: 80, rows: 24 }), { code: 'sdk.disconnected' });
     const creates = p.requests.filter(r => r.method === 'host.pty.create');
@@ -494,9 +585,9 @@ test('unknown create remains uncertain when retry cannot connect and send', { ti
   } finally { await assert.rejects(p.close(), { code: 'sdk.cleanup_incomplete' }); }
 });
 
-test('a validated same-key retry resolves initial create uncertainty and permits confirmed cleanup', { timeout: 5000 }, async () => {
+test('a validated same-key retry resolves initial create uncertainty and permits confirmed cleanup', { timeout: 5000 }, async t => {
   let attempts = 0;
-  const p = await peer({ create(request, result) {
+  const p = await peer(t, { create(request, result) {
     if (++attempts === 1) request.socket.terminate();
     else reply(request, result);
   } });
@@ -509,9 +600,9 @@ test('a validated same-key retry resolves initial create uncertainty and permits
   } finally { await p.close(); }
 });
 
-test('pre-send cancellation leaves cleanup certain, sent create cancellation does not', { timeout: 5000 }, async () => {
-  const accepted = channel<Request>();
-  const p = await peer({ create: request => accepted.push(request) });
+test('pre-send cancellation leaves cleanup certain, sent create cancellation does not', { timeout: 5000 }, async t => {
+  const accepted = channel<Request>(t);
+  const p = await peer(t, { create: request => accepted.push(request) });
   try {
     const before = new AbortController(); before.abort();
     await assert.rejects(p.app.host.pty.create({ cols: 80, rows: 24, signal: before.signal }), { code: 'sdk.cancelled' });
@@ -524,7 +615,7 @@ test('pre-send cancellation leaves cleanup certain, sent create cancellation doe
     await assert.rejects(p.app.close(), { code: 'sdk.cleanup_incomplete' });
   } finally { await assert.rejects(p.close(), { code: 'sdk.cleanup_incomplete' }); }
   // A context with only a pre-send refusal can still confirm cleanup.
-  const clean = await peer();
+  const clean = await peer(t);
   try {
     const aborted = new AbortController(); aborted.abort();
     await assert.rejects(clean.app.host.pty.create({ cols: 80, rows: 24, signal: aborted.signal }), { code: 'sdk.cancelled' });
@@ -532,8 +623,8 @@ test('pre-send cancellation leaves cleanup certain, sent create cancellation doe
   } finally { await clean.close(); }
 });
 
-test('failed terminal close stays visible to subsequent context close', { timeout: 5000 }, async () => {
-  const p = await peer({ close: request => reject(request, 'host.operation_failed') });
+test('failed terminal close stays visible to subsequent context close', { timeout: 5000 }, async t => {
+  const p = await peer(t, { close: request => reject(request, 'host.operation_failed') });
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     const close = terminal.close();
@@ -545,9 +636,9 @@ test('failed terminal close stays visible to subsequent context close', { timeou
   } finally { await assert.rejects(p.close(), { code: 'sdk.cleanup_incomplete' }); }
 });
 
-test('context close waits for a concurrent create and confirms destruction exactly once', { timeout: 5000 }, async () => {
-  const accepted = channel<{ request: Request; result: object }>();
-  const p = await peer({ create: (request, result) => accepted.push({ request, result }) });
+test('context close waits for a concurrent create and confirms destruction exactly once', { timeout: 5000 }, async t => {
+  const accepted = channel<{ request: Request; result: object }>(t);
+  const p = await peer(t, { create: (request, result) => accepted.push({ request, result }) });
   try {
     const creating = p.app.host.pty.create({ cols: 80, rows: 24 });
     const rejected = assert.rejects(creating, { code: 'sdk.closed' });
@@ -562,7 +653,7 @@ test('context close waits for a concurrent create and confirms destruction exact
 
 test('at most one heartbeat is in flight and close stops it without waiting for its reply', { timeout: 5000 }, async t => {
   const clock = heartbeatClock(t);
-  const p = await peer({ manualKeepalive: true });
+  const p = await peer(t, { manualKeepalive: true });
   try {
     const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
     clock.tick(10000);
@@ -575,5 +666,17 @@ test('at most one heartbeat is in flight and close stops it without waiting for 
     clock.tick(60000);
     await p.app.close();
     assert.equal(p.requests.filter(r => r.method === 'host.pty.keepalive').length, 1);
+  } finally { await p.close(); }
+});
+
+test('barrier propagates pre-send failure and removes its abandoned request waiter', { timeout: 5000 }, async t => {
+  const p = await peer(t);
+  try {
+    const closed = await p.app.host.pty.create({ cols: 80, rows: 24 });
+    await closed.close();
+    await assert.rejects(barrier(closed, p.calls), { code: 'sdk.closed' });
+    // If the failed barrier kept its waiter, it would steal this resize request.
+    const active = await p.app.host.pty.create({ cols: 80, rows: 24 });
+    await barrier(active, p.calls);
   } finally { await p.close(); }
 });

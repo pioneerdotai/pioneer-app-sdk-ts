@@ -69,3 +69,60 @@ The lease recovery budget can stop a still-live PTY conservatively. Handshake
 401/403 is terminal; bare connection loss alone does not identify revocation.
 Streaming capability subversion, dev integration and other language SDKs remain
 out of scope. Dependencies, exports and client sources were not changed.
+
+## Test synchronization follow-up (baseline 4e248ab)
+
+### External execution, supplied by the reviewer
+
+The reviewer closes the five previous production-code findings after static
+review. With Node.js 25.9.0, ws 8.23.0 and tsx 4.23.15, the command
+`/opt/homebrew/bin/node --import tsx --test tests/*.test.ts` reported 22 passing
+scenarios and an unhandled sdk.delivery_unknown rejection in `temporary keepalive
+error and transport loss recover without replacing the shell`. The process did
+not exit. A repeat full run failed the same way; an isolated run of that scenario
+passed. Dependencies were installed externally with bun install --ignore-scripts
+--no-save; the reviewer reported a clean Git tree. These are external results,
+not commands executed or reproduced in this follow-up.
+
+### Source analysis and changes, without execution
+
+The old global close observer accepted every WebSocket absent from the current
+peer's *server-side* connection list. It could therefore accept a late client
+close from an earlier peer and release the recovery barrier before the intended
+client closed. A resize could then be sent over the dying connection and reject
+with delivery_unknown. The barrier did not observe that rejection while awaiting
+a request that might never arrive. This source-level causal path matches the
+suite-only report; the exact foreign socket was not independently traced here.
+No independent production transport defect was established.
+
+The peer now tracks only client WebSockets whose public URL equals its endpoint,
+and correlates an RPC response ID with the server connection that received the
+request. Disconnect terminates that exact server socket and awaits close on both
+sides. It does not classify arbitrary global close events, read SDK private
+fields, synthesize a disconnect, or replace the real recovery test.
+
+The barrier races its cancellable channel wait against an immediately observed
+operation result. An operation failure propagates its original error; finally
+cancels/removes the abandoned waiter. The new regression closes one public PTY,
+expects its barrier to reject with sdk.closed, then completes another PTY's
+barrier on the same channel. A retained waiter would steal the latter request.
+
+Peer close is idempotent. Normal teardown awaits SDK shutdown and actual client,
+server-WebSocket and listening-server close events. Test hooks also drain on a
+failed/cancelled body: stop admission, terminate sockets, settle SDK shutdown,
+then include any handshake already queued when teardown began. Channels belong
+to TestContext, reject/release waiters at teardown and remove abort listeners.
+Their original rejected promises remain rejected for callers; immediate internal
+observation only prevents a cancelled body from leaving an unhandled rejection.
+An SDK-close rejection explicitly owned by a test remains observable to that test;
+a hook-initiated unexpected close failure is reported by the hook.
+
+Manual review covered normal/rejected close, queued handshakes, mock lifetime,
+RPC response correlation, the barrier's losing race branch and repeated teardown.
+The test-audit pass changed only tests/pty.test.ts; source/configuration diff stayed
+empty throughout. This documentation update follows that test-only pass.
+Production sources, public API, dependencies, Gateway and Terminal are unchanged.
+No sleeps or larger timeouts were introduced. No dependencies, tests, builds,
+type checks, linters, applications or executable checks were run in this pass.
+Whether the complete suite now passes and exits normally remains for external
+validation; neither outcome is claimed here.
