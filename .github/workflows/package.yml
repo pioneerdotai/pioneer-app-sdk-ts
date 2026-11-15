@@ -67,9 +67,13 @@ jobs:
         run: npm install --global npm@11.21.0 --ignore-scripts --registry=https://registry.npmjs.org
       - name: Publish tested SDK archive
         run: |
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ] || [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+            echo 'GitHub did not provide OIDC credentials; id-token: write is required.' >&2
+            exit 1
+          fi
           tag=main
           main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
           if [ "$main_sha" = "$GITHUB_SHA" ]; then tag=latest; fi
-          npm publish ./release-package/*.tgz --ignore-scripts --access public --tag "$tag" --registry=https://registry.npmjs.org
+          npm publish ./release-package/*.tgz --ignore-scripts --access public --tag "$tag" --registry=https://registry.npmjs.org --loglevel=verbose
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
