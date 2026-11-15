@@ -16,8 +16,10 @@ Consumers do not need a token or a custom registry for this public package.
 GitHub Actions publishes through npm Trusted Publishing (OIDC), without a stored
 publish secret. First-time package creation and the exact npm trust settings are
 documented in the publishing guide.
-PRs and merges to main only build/test. Publication requires a tag such as
-`v0.1.1` that matches package.json's version; it publishes the stable version `0.1.1`.
+`SDK PR checks` builds and tests only pull requests targeting main, saving the
+checked package archive. `Publish SDK to npm` runs only for version tags such as
+`v0.1.1`, and publishes the matching PR archive without rebuilding or retesting.
+Pushes and merges to main do not start either workflow.
 
 ```ts
 import { connectApp } from '@pioneercompany/app-sdk/client';

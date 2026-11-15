@@ -1,20 +1,23 @@
-name: Build and publish SDK
+name: Publish SDK to npm
 
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    concurrency:
+      group: sdk-npm
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -22,12 +25,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '26'
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: '1.4.3'
-      - run: bun install --frozen-lockfile --ignore-scripts
       - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           package_version=$(node -p "require('./package.json').version")
           if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -38,39 +36,38 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}." >&2
             exit 1
           fi
-      - run: bun run build
-      - run: bun run test
-      - run: bun run test:package
-      - name: Pack built SDK
+      - name: Find archive from successful PR checks
+        id: archive
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir release-package
-          npm pack --ignore-scripts --pack-destination release-package
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sdk-package
-          path: release-package/*.tgz
-          if-no-files-found: error
-          retention-days: 14
-
-  publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      id-token: write
-    concurrency:
-      group: sdk-npm
-      cancel-in-progress: false
-    steps:
+          source_tree=$(git rev-parse 'HEAD^{tree}')
+          artifacts=$(gh api --paginate --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f name="sdk-package-${source_tree}" -f per_page=100 \
+            --jq '.artifacts[] | select(.expired == false) | [.id, .workflow_run.id] | @tsv')
+          while IFS=$'\t' read -r artifact_id run_id; do
+            [ -n "$artifact_id" ] || continue
+            run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")
+            if ! jq -e '.event == "pull_request" and .conclusion == "success" and .path == ".github/workflows/ci.yml"' <<< "$run" > /dev/null; then
+              continue
+            fi
+            head_sha=$(jq -r '.head_sha' <<< "$run")
+            checked_tree=$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${head_sha}" --jq '.tree.sha')
+            [ "$checked_tree" = "$source_tree" ] || continue
+            echo "artifact_id=${artifact_id}" >> "$GITHUB_OUTPUT"
+            echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+            exit 0
+          done <<< "$artifacts"
+          echo 'No archive from successful SDK PR checks matches this release source. Complete PR checks for these exact files before publishing; expired archives require rerunning those checks.' >&2
+          exit 1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: sdk-package
+          artifact-ids: ${{ steps.archive.outputs.artifact_id }}
+          run-id: ${{ steps.archive.outputs.run_id }}
+          github-token: ${{ github.token }}
           path: release-package
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '26'
+          merge-multiple: true
       - name: Install npm with Trusted Publishing support
         run: npm install --global npm@11.21.0 --ignore-scripts --registry=https://registry.npmjs.org
       - name: Publish tested SDK archive
