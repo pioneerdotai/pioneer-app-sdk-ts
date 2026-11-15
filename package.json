@@ -1,6 +1,6 @@
 {
   "name": "@pioneercompany/app-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pioneer application client and Node.js backend SDK",
   "repository": { "type": "git", "url": "git+https://github.com/pioneerdotai/pioneer-app-sdk-ts.git" },
   "homepage": "https://github.com/pioneerdotai/pioneer-app-sdk-ts#readme",
