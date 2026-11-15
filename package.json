@@ -1,0 +1,20 @@
+{
+  "name": "@pioneer/app-sdk",
+  "version": "0.1.0",
+  "description": "Pioneer application client and Node.js backend SDK",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "files": ["dist", "README.md", "docs", "fixtures"],
+  "exports": {
+    "./client": { "types": "./dist/client/index.d.ts", "import": "./dist/client/index.js" },
+    "./server": { "types": "./dist/server/index.d.ts", "import": "./dist/server/index.js" }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": { "ws": "^8.18.3" },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/ws": "^8.18.1", "tsx": "^4.20.0", "typescript": "^5.9.0" }
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Literal wire examples; credentials are synthetic, never usable production secrets",
+  "bootstrap": {
+    "execution_id": "execution_fixture_001",
+    "ui_base_path": "/",
+    "ui_proxy": { "credential": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    "host_api": null
+  },
+  "user_id": "UserFixture0000000001",
+  "theme": {
+    "type": "pioneer.theme",
+    "palette": {
+      "appearance": "dark", "background": "#111111", "foreground": "#eeeeee",
+      "muted": "#999999", "border": "#333333", "accent": "#4488ff", "accent-foreground": "#ffffff"
+    }
+  },
+  "output": {
+    "jsonrpc": "2.0", "method": "host.pty.output",
+    "params": { "session_id": "session-1", "stream_id": "stream-1", "after": 0,
+      "bytes": [104, 105], "next": 2, "end": 2, "exit_status": null, "failed": false, "input_sequence": 0 }
+  },
+  "cursor_expired": {
+    "jsonrpc": "2.0", "id": "request-1",
+    "error": { "code": -32001, "message": "host.output_cursor_expired" }
+  }
+}
