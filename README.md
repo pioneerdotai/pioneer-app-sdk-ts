@@ -1,12 +1,24 @@
-# @pioneer/app-sdk
+# @pioneercompany/app-sdk
 
 SDK for the current Pioneer Apps contract. ESM and CommonJS, Node.js 22+
 server; browser client with no React or Node imports. No package root export.
-Implementation coverage: [contract table](docs/coverage.md). This revision has
-not been built or tested; external acceptance remains.
+Implementation coverage: [contract table](docs/coverage.md).
+For registry setup and installation with Bun/npm/pnpm/Yarn, see
+[npm publishing](docs/publishing.md). The public npm package is
+`@pioneercompany/app-sdk`; older local archives used `@pioneer/app-sdk`.
+
+```sh
+bun add @pioneercompany/app-sdk
+# or: npm install @pioneercompany/app-sdk
+```
+
+Consumers do not need a token or a custom registry for this public package.
+GitHub Actions publishes through npm Trusted Publishing (OIDC), without a stored
+publish secret. First-time package creation and the exact npm trust settings are
+documented in the publishing guide.
 
 ```ts
-import { connectApp } from '@pioneer/app-sdk/client';
+import { connectApp } from '@pioneercompany/app-sdk/client';
 const app = await connectApp({ baseUrl: './' }); // Only for a root document!
 // For nested documents render an authenticated <base href="../.../"> or pass
 // the exact view root. Do not infer a grant token from pathname segments.
@@ -36,7 +48,7 @@ For a direct root dev server use `connectApp({baseUrl:'/'})`; for mounted paths
 use the explicit mount root or base href. There is no process.env mode switch.
 
 ```ts
-import { createAppServerContext, nodeRequestHeaders } from '@pioneer/app-sdk/server';
+import { createAppServerContext, nodeRequestHeaders } from '@pioneercompany/app-sdk/server';
 const app = await createAppServerContext();
 // In your existing HTTP handler:
 const context = app.authenticateRequest(nodeRequestHeaders(req));
@@ -96,7 +108,7 @@ limits, retry, ACK, replay, cancellation and ownership semantics.
 
 Prepared commands for a later authorized review environment:
 
-- Install dependencies using npm (creates a lockfile; none generated here).
+- `bun install --frozen-lockfile`: install the pinned build/test dependencies.
 - `npm run build`: emit ESM/CJS, declarations/maps and the CJS package marker.
 - `npm run typecheck`: compilation checks without emit.
 - `npm test`: Node test runner through tsx, source tests without a build.

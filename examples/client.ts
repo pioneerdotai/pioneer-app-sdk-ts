@@ -1,5 +1,5 @@
-import { connectApp } from '@pioneer/app-sdk/client';
-import type { Theme } from '@pioneer/app-sdk/client';
+import { connectApp } from '@pioneercompany/app-sdk/client';
+import type { Theme } from '@pioneercompany/app-sdk/client';
 
 // Browser module initialization, BEFORE load/DOMContentLoaded. The installed
 // backend renders base href from its authenticated pioneer-app-base-path header.

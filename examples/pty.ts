@@ -1,4 +1,4 @@
-import { createAppServerContext } from '@pioneer/app-sdk/server';
+import { createAppServerContext } from '@pioneercompany/app-sdk/server';
 
 export async function run(consume: (bytes: Uint8Array) => Promise<void>) {
   const app = await createAppServerContext();

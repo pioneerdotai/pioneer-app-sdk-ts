@@ -25,15 +25,14 @@ and its type:commonjs marker. Pack includes both outputs, source files for maps,
 docs and fixtures. No root export, bundled ws, lifecycle hooks or publishing.
 Run the build explicitly before pack: --ignore-scripts intentionally cannot
 prepare missing output. The dist directories are generated and not committed.
-The source checkout has no newly generated dependency lockfile; generating and
-reviewing it, installation and artifact verification belong to external release
-acceptance. Do not claim bit-reproducible compilation from unlocked tool ranges.
+The source checkout includes bun.lock. Use bun install --frozen-lockfile for
+the pinned build dependencies. See publishing.md for the registry workflow.
 
 For local SDK development, copy the resulting tarball into Terminal as
 `vendor/pioneer-app-sdk-0.1.0.tgz`, and use this relative dependency:
 
 ```json
-{ "dependencies": { "@pioneer/app-sdk": "file:vendor/pioneer-app-sdk-0.1.0.tgz" } }
+{ "dependencies": { "@pioneercompany/app-sdk": "file:vendor/pioneer-app-sdk-0.1.0.tgz" } }
 ```
 
 Install it with Terminal's package manager in the separate integration step;
@@ -49,11 +48,12 @@ dependency and updated Terminal lockfile. Terminal's existing
 `bun install --frozen-lockfile` then consumes it without a neighboring checkout.
 The production image/artifact includes traced installed dependencies, not an SDK
 checkout. Alternatively use an exact registry release later, after a separately
-authorized publication. This task neither publishes nor changes Terminal's build.
+publication. The public npm workflow is described in publishing.md;
+Terminal's dependency and build are changed only during its separate integration.
 
-The CJS server keeps require('@pioneer/app-sdk/server') external, so the existing
+The CJS server keeps require('@pioneercompany/app-sdk/server') external, so the existing
 NFT tracer must include dist-cjs and runtime ws in Terminal's own node_modules.
-The client uses import('@pioneer/app-sdk/client'); browser bundling never reaches
+The client uses import('@pioneercompany/app-sdk/client'); browser bundling never reaches
 server code, Node APIs or bootstrap credentials. The separate package acceptance
 test covers real import/require resolution after building. Consumer build/trace
 acceptance still has to run in Terminal; this is a source-verified integration

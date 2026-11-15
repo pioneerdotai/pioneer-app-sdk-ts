@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { createAppServerContext, nodeRequestHeaders, PioneerError } from '@pioneer/app-sdk/server';
+import { createAppServerContext, nodeRequestHeaders, PioneerError } from '@pioneercompany/app-sdk/server';
 
 const app = await createAppServerContext();
 // Attach these functions to the application's existing server. SDK starts none.

@@ -1,7 +1,12 @@
 {
-  "name": "@pioneer/app-sdk",
+  "name": "@pioneercompany/app-sdk",
   "version": "0.1.0",
   "description": "Pioneer application client and Node.js backend SDK",
+  "repository": { "type": "git", "url": "git+https://github.com/pioneerdotai/pioneer-app-sdk-ts.git" },
+  "homepage": "https://github.com/pioneerdotai/pioneer-app-sdk-ts#readme",
+  "bugs": { "url": "https://github.com/pioneerdotai/pioneer-app-sdk-ts/issues" },
+  "publishConfig": { "registry": "https://registry.npmjs.org", "access": "public" },
+  "packageManager": "bun@1.4.3",
   "type": "module",
   "engines": { "node": ">=22" },
   "files": ["dist", "dist-cjs", "src", "README.md", "docs", "fixtures"],
