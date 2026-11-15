@@ -37,25 +37,52 @@ export class Pty {
   #queued = 0;
   #subscription: OutputSubscription | null = null;
   #detachSubscription: (() => void) | null = null;
+  #failSubscription: ((error: PioneerError) => void) | null = null;
   #heartbeat: ReturnType<typeof setInterval>;
   #keeping = false;
   #leaseError: PioneerError | null = null;
+  #heartbeatAbort = new AbortController();
+  #leaseFailures = 0;
+  #lastLease = performance.now();
+  #onDisconnect: () => void;
   #release: () => void;
   private constructor(transport: Transport, readonly id: string, sequence: number, release: () => void) {
     this.#transport = transport;
     this.#sequence = sequence;
     this.#release = release;
+    this.#onDisconnect = () => {
+      if (transport.closedError) this.#stopLease(transport.closedError);
+    };
+    transport.disconnects.add(this.#onDisconnect);
     this.#heartbeat = setInterval(() => {
       if (this.#keeping || this.#disposed || this.#leaseError) return;
+      // Leave a full minute before Gateway's five-minute retention deadline.
+      if (performance.now() - this.#lastLease >= 240000) {
+        this.#stopLease(failure("sdk.lease_unconfirmed")); return;
+      }
       this.#keeping = true;
-      void transport.call("host.pty.keepalive", { session_id: id }).catch(error => {
-        this.#leaseError = error instanceof PioneerError ? error : failure("sdk.disconnected");
-        clearInterval(this.#heartbeat);
+      void transport.call<{ alive: boolean }>("host.pty.keepalive", { session_id: id }, { signal: this.#heartbeatAbort.signal }, result => {
+        if (result?.alive !== true) throw failure("sdk.invalid_response");
+      }).then(() => {
+        this.#leaseFailures = 0; this.#lastLease = performance.now();
+      }).catch(error => {
+        if (this.#disposed || this.#leaseError) return;
+        const transient = error instanceof PioneerError && (error.source === "sdk" ||
+          error.code === "host.capacity" || error.code === "host.operation_failed");
+        if (!transient) this.#stopLease(error instanceof PioneerError ? error : failure("sdk.lease_unconfirmed"));
+        else if (++this.#leaseFailures >= 3) this.#stopLease(failure("sdk.lease_unconfirmed"));
       }).finally(() => { this.#keeping = false; });
     }, 10000);
     this.#heartbeat.unref();
   }
-  static async create(transport: Transport, options: CreatePtyOptions, release: () => void): Promise<Pty> {
+  #stopLease(error: PioneerError) {
+    this.#leaseError = error;
+    clearInterval(this.#heartbeat);
+    this.#heartbeatAbort.abort();
+    this.#failSubscription?.(error);
+    this.#transport.disconnects.delete(this.#onDisconnect);
+  }
+  static async create(transport: Transport, options: CreatePtyOptions, release: () => void, uncertain: (value: boolean) => void): Promise<Pty> {
     const params = {
       key: randomUUID(), dimensions: dimensions(options),
       ...(options.command === undefined ? {} : { command: [...options.command] }),
@@ -67,10 +94,15 @@ export class Pty {
     let result: { session_id: string; input_sequence: number };
     try { result = await transport.call("host.pty.create", params, options); }
     catch (error) {
-      if (!(error instanceof PioneerError) || error.code !== "sdk.delivery_unknown" || options.signal?.aborted) throw error;
+      if (!(error instanceof PioneerError) || error.code !== "sdk.delivery_unknown") throw error;
+      uncertain(true);
+      if (options.signal?.aborted) throw error;
       result = await transport.call("host.pty.create", params, options);
     }
-    if (typeof result?.session_id !== "string" || !integer(result.input_sequence)) throw failure("sdk.invalid_response");
+    if (typeof result?.session_id !== "string" || !integer(result.input_sequence)) {
+      uncertain(true); throw failure("sdk.invalid_response");
+    }
+    uncertain(false);
     return new Pty(transport, result.session_id, result.input_sequence, release);
   }
   #assert() {
@@ -115,11 +147,11 @@ export class Pty {
     let cursor = options.after ?? 0;
     if (!integer(cursor)) throw failure("sdk.invalid_cursor");
     let delivered = cursor, stream = "", generation = 0, active = true, recovering = false, recoveries = 0;
-    let outstanding = 0;
+    let outstanding: number[] = [];
     let pendingAcks = 0;
     let ackQueue = Promise.resolve();
     const transport = this.#transport;
-    const dispose = (reset = true) => {
+    const dispose = () => {
       if (!active) return;
       active = false; generation++;
       transport.outputs.delete(this.id);
@@ -127,9 +159,9 @@ export class Pty {
       options.signal?.removeEventListener("abort", abortSubscription);
       this.#subscription = null;
       this.#detachSubscription = null;
-      // There is no wire unsubscribe. Closing the shared connection removes
-      // its streams; other subscriptions recover from their consumed cursors.
-      if (reset) transport.reset();
+      this.#failSubscription = null;
+      // No wire unsubscribe: stop granting credit. The bounded connection-local
+      // stream is replaced by subscribe, removed by PTY close or disconnect.
     };
     const fail = (error: unknown) => {
       if (!active) return;
@@ -144,7 +176,8 @@ export class Pty {
           !Array.isArray(f.bytes) || f.bytes.length > 16384 || !f.bytes.every((b: unknown) => integer(b) && b <= 255) ||
           f.next !== f.after + f.bytes.length || f.end < f.next || typeof f.failed !== "boolean" ||
           !(f.exit_status === null || integer(f.exit_status))) { fail(failure("sdk.invalid_output")); return; }
-      if (f.next - cursor > 65536 || ++outstanding > 66) { fail(failure("sdk.capacity")); return; }
+      if (f.next - cursor > 65536 || (f.next > f.after && outstanding.length >= 64)) { fail(failure("sdk.capacity")); return; }
+      if (f.next > f.after) outstanding.push(f.next);
       delivered = f.next;
       const token = generation, next: number = f.next;
       const ack = () => {
@@ -153,11 +186,11 @@ export class Pty {
         const operation = ackQueue.then(async () => {
           if (!active || generation !== token) throw failure("sdk.stale_receipt");
           if (next <= cursor) return;
-          const result = await transport.call<{ acknowledged: boolean }>("host.pty.ack", { session_id: this.id, stream_id: stream, after: next });
-          if (!active || generation !== token) throw failure("sdk.stale_receipt");
-          if (result?.acknowledged !== true) throw failure("sdk.stale_receipt");
-          cursor = Math.max(cursor, next);
-          outstanding = 0;
+          await transport.call<{ acknowledged: boolean }>("host.pty.ack", { session_id: this.id, stream_id: stream, after: next }, {}, result => {
+            if (!active || generation !== token || result?.acknowledged !== true) throw failure("sdk.stale_receipt");
+            cursor = Math.max(cursor, next);
+            outstanding = outstanding.filter(end => end > cursor);
+          });
         }).finally(() => { pendingAcks--; });
         ackQueue = operation.catch(() => {});
         return operation;
@@ -167,7 +200,7 @@ export class Pty {
     };
     const watch = async () => {
       if (!active) return;
-      generation++; stream = randomUUID(); delivered = cursor; outstanding = 0;
+      generation++; stream = randomUUID(); delivered = cursor; outstanding = [];
       transport.outputs.set(this.id, receive);
       await transport.call("host.pty.subscribe", { session_id: this.id, stream_id: stream, after: cursor }, options);
     };
@@ -191,7 +224,8 @@ export class Pty {
     const abortSubscription = () => dispose();
     const subscription: OutputSubscription = Object.freeze({ get cursor() { return cursor; }, dispose: () => dispose() });
     this.#subscription = subscription;
-    this.#detachSubscription = () => dispose(false);
+    this.#detachSubscription = dispose;
+    this.#failSubscription = fail;
     transport.disconnects.add(reconnect);
     options.signal?.addEventListener("abort", abortSubscription, { once: true });
     if (options.signal?.aborted) { dispose(); throw failure("sdk.cancelled"); }
@@ -205,13 +239,18 @@ export class Pty {
     if (this.#disposed) return;
     this.#disposed = true;
     clearInterval(this.#heartbeat);
+    this.#heartbeatAbort.abort();
+    this.#transport.disconnects.delete(this.#onDisconnect);
     this.#detachSubscription?.();
   }
   /** Destroy this owned PTY, separately from unsubscribing output. */
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#disposeLocal();
-    this.#closing = this.#transport.call("host.pty.close", { session_id: this.id }).then(() => {}).finally(this.#release);
+    this.#closing = this.#transport.call<{ closed: boolean }>("host.pty.close", { session_id: this.id }).then(result => {
+      if (result?.closed !== true) throw failure("sdk.invalid_response");
+      this.#release();
+    });
     return this.#closing;
   }
 }

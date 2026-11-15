@@ -29,9 +29,10 @@ host.operation_failed. Applications must tolerate future codes.
 | sdk.disconnected | Connection unavailable before send |
 | sdk.delivery_unknown | Sent operation may have taken effect |
 | sdk.input_blocked | Earlier uncertain input prevents subsequent input |
+| sdk.lease_unconfirmed | Bounded keepalive recovery exhausted; not proof of remote expiry |
 | sdk.stale_receipt | ACK belongs to a replaced/disposed stream |
 | sdk.callback_failed | Output callback threw an untyped exception |
-| sdk.cleanup_incomplete | Local teardown done, remote PTY close unconfirmed |
+| sdk.cleanup_incomplete | Local teardown done, unknown create or remote PTY close unconfirmed |
 
 Significant Gateway codes: host.revoked, host.method_not_allowed,
 host.invalid_params, host.invalid_dimensions, host.capacity,

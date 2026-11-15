@@ -1,6 +1,6 @@
 # @pioneer/app-sdk
 
-First review candidate for production Pioneer applications. ESM, Node.js 22+
+Review candidate for production Pioneer applications. ESM, Node.js 22+
 server; browser client with no React or Node imports. No package root export.
 No installation, compilation, tests or examples have been executed for this draft.
 
@@ -69,7 +69,14 @@ client themes belong to individual views. Use `PioneerError.code` and `source`
 (`sdk` or `host`) for decisions, never parse messages. Host codes are preserved;
 SDK codes cover invalid configuration, unauthorized/missing user, unavailable
 capability, bounds, cancellation, ambiguous delivery, stale receipts, blocked
-input and incomplete cleanup. See [the contract](docs/contract.md) for precise
+input, unconfirmed lease and incomplete cleanup. Unsubscribe is local: it does
+not reset the shared connection or interrupt another PTY's input. Residual remote
+output is bounded until stream replacement, PTY close or disconnect. A confirmed
+ACK advances credit before the next output message, including a synchronous burst.
+Transient keepalive failures have a finite recovery budget without blocking
+ordinary operations immediately. Unknown creates and failed closes cause
+context close to report `sdk.cleanup_incomplete`, even after local teardown.
+See [the contract](docs/contract.md) for precise
 limits, retry, ACK, replay, cancellation and ownership semantics.
 
 Prepared commands for a later authorized review environment:

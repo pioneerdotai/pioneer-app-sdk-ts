@@ -47,6 +47,7 @@ export async function createAppServerContext(options: ServerOptions = {}): Promi
   const capabilities = Object.freeze([...(bootstrap.host_api?.capabilities ?? [])]);
   const owned = new Set<Pty>();
   const creating = new Set<Promise<Pty>>();
+  const uncertainCreates = new Set<object>();
   let stopped = false;
   let closing: Promise<void> | null = null;
   const assertOpen = () => { if (stopped) throw failure("sdk.closed"); };
@@ -64,14 +65,18 @@ export async function createAppServerContext(options: ServerOptions = {}): Promi
         async create(options: CreatePtyOptions) {
           assertOpen();
           if (!capabilities.includes("host.pty")) throw failure("sdk.capability_unavailable");
-          if (owned.size + creating.size >= 8) throw failure("sdk.capacity");
+          if (owned.size + creating.size + uncertainCreates.size >= 8) throw failure("sdk.capacity");
           let terminal: Pty;
-          const operation = Pty.create(transport, options, () => { owned.delete(terminal); });
+          const creation = {};
+          const operation = Pty.create(transport, options, () => { owned.delete(terminal); }, value => {
+            if (value) uncertainCreates.add(creation);
+            else uncertainCreates.delete(creation);
+          });
           creating.add(operation);
           try {
             terminal = await operation;
-            if (stopped) { await terminal.close(); throw failure("sdk.closed"); }
             owned.add(terminal);
+            if (stopped) { await terminal.close(); throw failure("sdk.closed"); }
             return terminal;
           } finally { creating.delete(operation); }
         },
@@ -93,7 +98,7 @@ export async function createAppServerContext(options: ServerOptions = {}): Promi
         const results = await Promise.allSettled([...terminals].map(terminal => terminal.close()));
         transport.close();
         expected.fill(0);
-        if (results.some(r => r.status === "rejected")) throw failure("sdk.cleanup_incomplete");
+        if (uncertainCreates.size || results.some(r => r.status === "rejected")) throw failure("sdk.cleanup_incomplete");
       })();
       return closing;
     },

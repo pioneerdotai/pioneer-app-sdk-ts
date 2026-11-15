@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { failure, hostFailure, PioneerError } from "../error.js";
 import type { Bootstrap } from "./config.js";
 
@@ -75,7 +75,7 @@ export class Transport {
     return tracked;
   }
   /** No implicit retries: callers must establish operation-specific safety. */
-  async call<T>(method: string, params: object, options: OperationOptions = {}): Promise<T> {
+  async call<T>(method: string, params: object, options: OperationOptions = {}, onResult?: (value: T) => void): Promise<T> {
     if (options.signal?.aborted) throw failure("sdk.cancelled");
     if (this.#pending.size + this.#waiting >= 64) throw failure("sdk.capacity");
     this.#waiting++;
@@ -94,14 +94,23 @@ export class Transport {
     if (this.#pending.size >= 64 || socket.bufferedAmount > 128 * 1024) throw failure("sdk.capacity");
     if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) throw failure("sdk.disconnected");
     return new Promise<T>((resolve, reject) => {
-      const id = randomUUID();
+      // RequestId is exactly 21 characters; 126 random bits, unlike UUID's
+      // incompatible 36-character representation. Keys/stream IDs are separate.
+      let id: string;
+      do { id = randomBytes(16).toString("base64url").slice(0, 21); } while (this.#pending.has(id));
       const finish = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); this.#pending.delete(id); };
       // Once sent, cancellation/timeout cannot retract a Gateway operation.
       const abort = () => { finish(); reject(failure("sdk.delivery_unknown")); };
       const timer = setTimeout(() => { finish(); reject(failure("sdk.delivery_unknown")); this.reset(); }, 10000);
       this.#pending.set(id, {
         socket,
-        resolve: value => { finish(); resolve(value as T); },
+        resolve: value => {
+          finish();
+          // Apply protocol state synchronously before ws delivers another
+          // message from the same network read. This is not a consumer ACK.
+          try { onResult?.(value as T); resolve(value as T); }
+          catch (error) { reject(error instanceof PioneerError ? error : failure("sdk.invalid_response")); }
+        },
         reject: error => { finish(); reject(error); },
       });
       options.signal?.addEventListener("abort", abort, { once: true });

@@ -47,7 +47,10 @@ Subscription delivers future updates only. Disposing removes the listener.
 
 Backend-only WebSocket at bootstrap host_api.endpoint. Authorization: Bearer
 execution credential; no Origin. Capability host.pty is required. JSON-RPC 2.0,
-string request identifiers. Errors use numeric -32001 and a stable host.* string
+request identifiers of exactly 21 Unicode characters (Gateway RequestId).
+SDK generates 21 ASCII base64url characters with 126 random bits and excludes
+collisions with pending requests. Create keys and stream IDs retain their own
+independent limits; they are not RequestId. Errors use numeric -32001 and a stable host.* string
 in error.message. Preserve host string codes independently of SDK codes.
 No protocol version or capability subversion is currently supplied.
 Execution revocation closes connections; handshake 401/403 is terminal, other
@@ -97,25 +100,49 @@ replays from the last confirmed consumed cursor, potentially duplicating data;
 applications should tolerate replay. ACK receipts from old connections are
 fenced. Exactly-once downstream display is not guaranteed. Cursor arithmetic
 uses safe integers in TypeScript; values beyond 2^53-1 are rejected, not rounded.
+Confirmed ACK state is applied synchronously while dispatching its response,
+before subsequent output messages, even in the same ws receive stack. Sending
+an ACK alone does not advance the consumed cursor. Partial cumulative ACKs
+remove only frame ends at or below the confirmed cursor from the outstanding
+64-frame window. Zero-byte process-state notifications do not consume data credit.
 
 ## Ownership, cancellation and bounds
 
 One SDK context owns only PTYs it creates. No attach or adoption API in v1.
 One output subscription per handle. dispose unsubscribes locally, invalidates
 receipts and removes callbacks, without killing the PTY. Gateway has no
-unsubscribe method: SDK resets the shared socket to remove connection-local
-streams. Other subscriptions recover; this consumes their bounded recovery
-budget (three attempts over each subscription lifetime). A failed subscription
+unsubscribe method: local disposal stops ACK credit and ignores residual output.
+The remote stream remains bounded by 64 KiB / 64 data frames, is replaced by
+subscribe for the same session, and is removed by PTY close or connection close.
+Other operations and subscriptions retain their connection and recovery budgets
+(three attempts over each subscription lifetime). A failed subscription
 is disposed and reports onError. Re-subscribe explicitly to start a new budget.
 No timers loop on connection failure.
 
 PTY close stops its timers/subscription and asks Gateway to destroy the process.
 Context close waits for pending creates, closes owned handles, closes transport
-and reports sdk.cleanup_incomplete if remote destruction was not confirmed.
+and reports sdk.cleanup_incomplete if remote destruction was not confirmed,
+including a create with an unknown result or any previously failed PTY close.
+Unknown creates remain tracked across their one same-key retry until a valid
+session response resolves identity. A refusal before send creates no uncertainty;
+a refusal of a retry does not erase the earlier unknown outcome. Tracking of
+unresolved creates and owned handles is bounded by the context's eight-slot limit.
+Successful terminal close requires closed:true and releases ownership; a failed
+close remains owned with its settled rejection, so repeated close calls are
+idempotent and context close reports incomplete cleanup. No discovery API is used.
 Local disposal is guaranteed even on that error; Gateway lease/revocation is the
 fallback for remote cleanup. No signals, process.exit, HTTP server, or port choice.
-An idle PTY receives one keepalive every ten seconds; keepalive failure stops the
-heartbeat and fails subsequent operations. Context close still attempts cleanup.
+An idle PTY receives one keepalive every ten seconds, with at most one in flight.
+Local capacity, transport errors, host.capacity and host.operation_failed allow
+up to three consecutive failed heartbeats; a successful alive:true resets that
+budget. Recovery never creates a shell. After three failures or 240 seconds
+without confirmed keepalive, sdk.lease_unconfirmed stops heartbeats and local
+subscription delivery. This is uncertainty, not proof of expiry. Other Host
+errors (including session_expired, session_unavailable and revoked) stop them
+immediately with the original code. Operations remain usable during transient
+failures. Close/revocation aborts an in-flight heartbeat and stops the interval;
+context close still attempts cleanup. Gateway's five-minute lease remains the
+authority, not the SDK's shorter recovery budget.
 
 RPC deadline 10 seconds, connection handshake deadline 10 seconds, max 64 calls,
 max 64 queued ACK calls per subscription,
