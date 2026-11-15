@@ -11,39 +11,32 @@ update imports when switching a consumer to the registry package.
 There are two independent workflows:
 
 - **SDK PR checks** (`.github/workflows/ci.yml`) runs only on pull requests
-  targeting main. It checks out the PR head, builds ESM/CJS, runs source tests and
-  built-package acceptance tests, then saves the npm archive for 90 days.
+  targeting main. It builds ESM/CJS and runs source tests and built-package
+  acceptance tests.
 - **Publish SDK to npm** (`.github/workflows/package.yml`) runs only when a
-  release tag such as `v0.1.1` is pushed. It validates the version and downloads
-  the archive from successful PR checks for exactly the same Git source tree.
-  It does not install SDK dependencies, build, test or repack the SDK.
+  release tag such as `v0.1.1` is pushed. It checks out that tag, validates the
+  version, installs dependencies from the lockfile, builds ESM/CJS, packs and
+  publishes the SDK. It does not run tests or depend on PR checks or artifacts.
 
 Pushes and merges to main do not start either workflow. There is no manual
-workflow trigger. A release is rejected if a matching successful PR archive is
-missing or expired; it never falls back to an unchecked archive or a new build.
-Merge and squash commit IDs may differ from the PR head: the full Git tree,
-including the workflow files and version, must match. If merging changes the
-tree, check those resulting files in a PR before releasing them.
+workflow trigger. The publishing workflow is independent of the PR workflow.
 
 Publication uses npm Trusted Publishing through GitHub Actions OIDC, not a
-stored npm token. Only the publish workflow has id-token:write; actions:read
-allows it to download the PR archive. npm 11.21.0 is installed
+stored npm token. Only the publish workflow has id-token:write. npm 11.21.0 is installed
 in that job explicitly, and satisfies the OIDC minimum version. No NODE_AUTH_TOKEN,
 NPM_TOKEN, personal GitHub token or GitHub Packages access is needed.
 
 The version comes directly from package.json, and the tag must exactly match
 `v` plus that version. Only stable `vX.Y.Z` tags are supported; malformed or
-mismatched tags fail before downloading an archive. There are no generated main versions,
+mismatched tags fail before installing SDK dependencies. There are no generated main versions,
 automatic version commits or automatic Git tags. Both entry points are in the
 same archive, published publicly under npm's `latest` tag. A published version
 cannot be replaced; use a new version and tag for the next release.
 
 ## Release a version
 
-1. Change package.json's version to the next release, for example `0.1.1`, in
-   a PR. Wait for **SDK PR checks** to pass, then merge it to main. Other PRs
-   may be merged before releasing; the tagged source must have a matching
-   successful PR archive. Direct main commits do not produce release archives.
+1. Set package.json's version to the next release, for example `0.1.1`, and
+   commit that change. Other changes may be merged before releasing.
 2. Tag the desired main commit and push that tag:
 
    ```sh
@@ -52,12 +45,12 @@ cannot be replaced; use a new version and tag for the next release.
    git push origin v0.1.1
    ```
 
-3. **Publish SDK to npm** validates the version, finds the matching checked PR
-   archive and publishes `0.1.1` without another build or test run.
+3. **Publish SDK to npm** validates the version, builds and packs the tagged
+   source, then publishes `0.1.1` without running tests.
    Do not move an existing release tag. Rerunning a failed publish can reuse
    the tag if that version has not reached npm; an already published version
-   cannot be published again. If the archive has expired, rerun the matching PR
-   checks before retrying publication.
+   cannot be published again. A rerun uses the workflow from the original tag;
+   changes to main do not update an existing tag's workflow.
 
 ## One-time maintainer setup
 
@@ -95,7 +88,7 @@ cannot be replaced; use a new version and tag for the next release.
    after adding the trusted publisher. npm requires a first successful OIDC
    publication in this period to validate the repository identity; if it expires,
    delete and recreate the connection. Once validated, later release tags publish
-   automatically from checked PR archives; main merges start no workflows.
+   automatically from their tagged source; main merges start no workflows.
    Changing the publishing workflow filename requires a matching new npm
    trusted publisher configuration.
 5. After successful OIDC publication, set the package's Publishing access to
