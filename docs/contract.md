@@ -35,13 +35,22 @@ view URL, never execution credentials.
 
 ## Theme
 
-Parent posts {type:'pioneer.theme',palette:{appearance,background,foreground,
+The iframe parent, or the direct dev page's own window, posts
+{type:'pioneer.theme',palette:{appearance,background,foreground,
 muted,border,accent,'accent-foreground'}}. appearance is light/dark; colors are
-valid CSS colors of at most 128 characters. Check event.source === parent and
-parent !== self; do not demand a non-opaque origin. There is no handshake or
-ready event. Register early, before iframe load; late subscribers cannot request
-a resend. current is null until a valid message and remains null outside Pioneer.
-Subscription delivers future updates only. Disposing removes the listener.
+valid CSS colors of at most 128 characters. Embedded pages check source===parent
+without demanding a non-opaque origin. Top-level pages check source===window AND
+origin===location.origin. Theme is public styling data, never an identity proof.
+No environment variable, handshake or ready event is involved. Import is inert
+and SSR-safe; call connectApp at browser module initialization before iframe load
+(production) or DOMContentLoaded (dev). It installs its listener synchronously,
+before awaiting the returned promise. Dev injection sends at initialization and
+DOMContentLoaded; native load/theme updates may send again, but a late connection
+cannot request a resend. current starts null until a valid message. subscribe
+immediately delivers known current, then future updates. Connections own separate
+state/listeners; disposing one leaves another active. Reconnecting after disposal
+starts null. No palette is synthesized outside Pioneer. SDK never mutates DOM,
+styles or hydration markup: the application owns state and rendering.
 
 ## Host transport
 
@@ -64,11 +73,20 @@ PTY methods (wire spelling):
 | host.pty.create | key, dimensions, optional command:string[], cwd:string | session_id, input_sequence, retention_seconds:300 |
 | host.pty.input | session_id, sequence, bytes:u8[] | accepted_sequence |
 | host.pty.resize | session_id, dimensions | operation completion |
-| host.pty.keepalive | session_id | operation completion |
-| host.pty.close | session_id | operation completion |
+| host.pty.keepalive | session_id | alive:true (Pty.keepalive plus automatic heartbeat) |
+| host.pty.close | session_id | closed:true |
 | host.pty.subscribe | session_id, stream_id, after | subscribed, window:65536 |
 | host.pty.ack | session_id, stream_id, after | acknowledged:boolean |
-| host.pty.read | session_id, after | bounded output snapshot (legacy; not exposed) |
+| host.pty.read | session_id, after | Pty.read snapshot: bytes,next,end,exitStatus,failed,inputSequence |
+
+Legacy host.pty.changed notifications contain session heads (session_id,start,end,
+exit_status,failed), delivered by owned handles' onChanged listeners. These are
+coalesced hints, not output or process completion proof: output_heads may report
+exit before PTY EOF. Gateway suppresses changed on the entire connection after
+its first subscribe, even after unsubscribe. Use streaming for normal output.
+Legacy readers must read initially and after reconnect; onChanged is not a
+lossless event log. SDK exposes all eight existing RPC methods without a generic
+RPC escape hatch or internal Gateway services.
 
 Dimensions: cols/rows 1..1000, optional pixel_width/pixel_height u16.
 Create keys are execution-scoped, max 128 bytes, deduplicate identical parameter
@@ -105,6 +123,9 @@ before subsequent output messages, even in the same ws receive stack. Sending
 an ACK alone does not advance the consumed cursor. Partial cumulative ACKs
 remove only frame ends at or below the confirmed cursor from the outstanding
 64-frame window. Zero-byte process-state notifications do not consume data credit.
+frame.streamId changes on replacement/replay: discard old queued unconsumed
+frames, retain a downstream accepted cursor and trim accepted replay prefixes.
+read does not ACK a stream or change input-sequence ownership.
 
 ## Ownership, cancellation and bounds
 
@@ -118,6 +139,9 @@ Other operations and subscriptions retain their connection and recovery budgets
 (three attempts over each subscription lifetime). A failed subscription
 is disposed and reports onError. Re-subscribe explicitly to start a new budget.
 No timers loop on connection failure.
+Initial subscribe shares that same finite recovery budget. A transport-generation
+check after subscribe detects a disconnect immediately following its response,
+including a synchronous response/error burst before Promise continuations run.
 
 PTY close stops its timers/subscription and asks Gateway to destroy the process.
 Context close waits for pending creates, closes owned handles, closes transport

@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import { failure, hostFailure, PioneerError } from "../error.js";
 import { Transport } from "./transport.js";
 import type { OperationOptions } from "./transport.js";
+import { decodeSnapshot } from "./output.js";
+import type { PtyHead, PtySnapshot } from "./output.js";
 
 export interface Dimensions { cols: number; rows: number; pixelWidth?: number; pixelHeight?: number }
 export interface CreatePtyOptions extends Dimensions, OperationOptions { command?: readonly string[]; cwd?: string }
+export interface ReadPtyOptions extends OperationOptions { after: number }
 export interface OutputFrame {
+  /** Changes on replay/replacement; lets a consumer discard its old queued frames. */
+  readonly streamId: string;
   readonly bytes: Uint8Array;
   readonly after: number;
   readonly next: number;
@@ -46,10 +51,18 @@ export class Pty {
   #lastLease = performance.now();
   #onDisconnect: () => void;
   #release: () => void;
+  #changeListeners = new Set<(head: PtyHead) => void>();
   private constructor(transport: Transport, readonly id: string, sequence: number, release: () => void) {
     this.#transport = transport;
     this.#sequence = sequence;
     this.#release = release;
+    transport.changes.set(id, head => {
+      for (const listener of [...this.#changeListeners]) {
+        if (this.#disposed || this.#leaseError) break;
+        if (!this.#changeListeners.has(listener)) continue;
+        try { listener(head); } catch { /* Isolate consumers of legacy hints. */ }
+      }
+    });
     this.#onDisconnect = () => {
       if (transport.closedError) this.#stopLease(transport.closedError);
     };
@@ -61,11 +74,7 @@ export class Pty {
         this.#stopLease(failure("sdk.lease_unconfirmed")); return;
       }
       this.#keeping = true;
-      void transport.call<{ alive: boolean }>("host.pty.keepalive", { session_id: id }, { signal: this.#heartbeatAbort.signal }, result => {
-        if (result?.alive !== true) throw failure("sdk.invalid_response");
-      }).then(() => {
-        this.#leaseFailures = 0; this.#lastLease = performance.now();
-      }).catch(error => {
+      void this.keepalive({ signal: this.#heartbeatAbort.signal }).catch(error => {
         if (this.#disposed || this.#leaseError) return;
         const transient = error instanceof PioneerError && (error.source === "sdk" ||
           error.code === "host.capacity" || error.code === "host.operation_failed");
@@ -81,6 +90,8 @@ export class Pty {
     this.#heartbeatAbort.abort();
     this.#failSubscription?.(error);
     this.#transport.disconnects.delete(this.#onDisconnect);
+    this.#transport.changes.delete(this.id);
+    this.#changeListeners.clear();
   }
   static async create(transport: Transport, options: CreatePtyOptions, release: () => void, uncertain: (value: boolean) => void): Promise<Pty> {
     const params = {
@@ -139,14 +150,37 @@ export class Pty {
   }
   async resize(size: Dimensions, options: OperationOptions = {}): Promise<void> {
     this.#assert();
-    await this.#transport.call("host.pty.resize", { session_id: this.id, dimensions: dimensions(size) }, options);
+    const result = await this.#transport.call<{ resized: boolean }>("host.pty.resize", { session_id: this.id, dimensions: dimensions(size) }, options);
+    if (result?.resized !== true) throw failure("sdk.invalid_response");
+  }
+  /** Bounded legacy snapshot. This neither advances stream credit nor ACKs it. */
+  async read(options: ReadPtyOptions): Promise<PtySnapshot> {
+    this.#assert();
+    const after = options.after;
+    if (!integer(after)) throw failure("sdk.invalid_cursor");
+    const value = await this.#transport.call("host.pty.read", { session_id: this.id, after }, options);
+    return decodeSnapshot(value, after);
+  }
+  async keepalive(options: OperationOptions = {}): Promise<void> {
+    this.#assert();
+    await this.#transport.call<{ alive: boolean }>("host.pty.keepalive", { session_id: this.id }, options, result => {
+      if (result?.alive !== true) throw failure("sdk.invalid_response");
+      this.#leaseFailures = 0; this.#lastLease = performance.now();
+    });
+  }
+  /** Legacy invalidation hint; Gateway suppresses it after any stream subscribe. */
+  onChanged(listener: (head: PtyHead) => void): () => void {
+    this.#assert();
+    if (this.#changeListeners.size >= 64) throw failure("sdk.capacity");
+    this.#changeListeners.add(listener);
+    return () => { this.#changeListeners.delete(listener); };
   }
   async subscribe(options: SubscribeOptions): Promise<OutputSubscription> {
     this.#assert();
     if (this.#subscription) throw failure("sdk.subscription_exists");
     let cursor = options.after ?? 0;
     if (!integer(cursor)) throw failure("sdk.invalid_cursor");
-    let delivered = cursor, stream = "", generation = 0, active = true, recovering = false, recoveries = 0;
+    let delivered = cursor, stream = "", generation = 0, active = true, recovering = true, recoveries = 0;
     let outstanding: number[] = [];
     let pendingAcks = 0;
     let ackQueue = Promise.resolve();
@@ -175,7 +209,7 @@ export class Pty {
       if (!integer(f.after) || !integer(f.next) || !integer(f.end) || f.after !== delivered ||
           !Array.isArray(f.bytes) || f.bytes.length > 16384 || !f.bytes.every((b: unknown) => integer(b) && b <= 255) ||
           f.next !== f.after + f.bytes.length || f.end < f.next || typeof f.failed !== "boolean" ||
-          !(f.exit_status === null || integer(f.exit_status))) { fail(failure("sdk.invalid_output")); return; }
+          !(f.exit_status === null || (integer(f.exit_status) && f.exit_status <= 0xffffffff))) { fail(failure("sdk.invalid_output")); return; }
       if (f.next - cursor > 65536 || (f.next > f.after && outstanding.length >= 64)) { fail(failure("sdk.capacity")); return; }
       if (f.next > f.after) outstanding.push(f.next);
       delivered = f.next;
@@ -195,31 +229,37 @@ export class Pty {
         ackQueue = operation.catch(() => {});
         return operation;
       };
-      try { options.onOutput(Object.freeze({ bytes: Uint8Array.from(f.bytes), after: f.after, next, end: f.end, exitStatus: f.exit_status, failed: f.failed, ack })); }
+      try { options.onOutput(Object.freeze({ streamId: stream, bytes: Uint8Array.from(f.bytes), after: f.after, next, end: f.end, exitStatus: f.exit_status, failed: f.failed, ack })); }
       catch (error) { fail(error); }
     };
     const watch = async () => {
       if (!active) return;
       generation++; stream = randomUUID(); delivered = cursor; outstanding = [];
       transport.outputs.set(this.id, receive);
-      await transport.call("host.pty.subscribe", { session_id: this.id, stream_id: stream, after: cursor }, options);
+      let connection = -1;
+      await transport.call<{ subscribed: boolean; window: number }>("host.pty.subscribe", { session_id: this.id, stream_id: stream, after: cursor }, options, result => {
+        if (result?.subscribed !== true || result.window !== 65536) throw failure("sdk.invalid_response");
+        connection = transport.generation;
+      });
+      if (!active) throw failure("sdk.cancelled");
+      if (transport.closedError) throw transport.closedError;
+      if (transport.generation !== connection) throw failure("sdk.disconnected");
+    };
+    const restore = async (firstError: unknown) => {
+      let last = firstError;
+      while (active && recoveries++ < 3) {
+        if (last instanceof PioneerError && (last.source === "host" || !["sdk.disconnected", "sdk.delivery_unknown"].includes(last.code))) throw last;
+        try { await watch(); return; } catch (error) { last = error; }
+      }
+      throw last;
     };
     const reconnect = () => {
-      if (!active || recovering) return;
+      if (!active) return;
       generation++;
+      if (recovering) return;
       if (transport.closedError) { fail(transport.closedError); return; }
       recovering = true;
-      void (async () => {
-        let last: unknown = failure("sdk.disconnected");
-        while (active && recoveries++ < 3) {
-          try { await watch(); return; }
-          catch (error) {
-            last = error;
-            if (error instanceof PioneerError && error.source === "host") break;
-          }
-        }
-        if (active) fail(last);
-      })().finally(() => { recovering = false; });
+      void restore(failure("sdk.disconnected")).catch(fail).finally(() => { recovering = false; });
     };
     const abortSubscription = () => dispose();
     const subscription: OutputSubscription = Object.freeze({ get cursor() { return cursor; }, dispose: () => dispose() });
@@ -229,8 +269,11 @@ export class Pty {
     transport.disconnects.add(reconnect);
     options.signal?.addEventListener("abort", abortSubscription, { once: true });
     if (options.signal?.aborted) { dispose(); throw failure("sdk.cancelled"); }
-    try { await watch(); }
+    try {
+      try { await watch(); } catch (error) { await restore(error); }
+    }
     catch (error) { dispose(); throw error; }
+    finally { recovering = false; }
     if (!active) throw failure("sdk.cancelled");
     return subscription;
   }
@@ -241,6 +284,8 @@ export class Pty {
     clearInterval(this.#heartbeat);
     this.#heartbeatAbort.abort();
     this.#transport.disconnects.delete(this.#onDisconnect);
+    this.#transport.changes.delete(this.id);
+    this.#changeListeners.clear();
     this.#detachSubscription?.();
   }
   /** Destroy this owned PTY, separately from unsubscribing output. */

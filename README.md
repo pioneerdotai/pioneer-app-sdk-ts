@@ -1,8 +1,9 @@
 # @pioneer/app-sdk
 
-Review candidate for production Pioneer applications. ESM, Node.js 22+
+SDK for the current Pioneer Apps contract. ESM and CommonJS, Node.js 22+
 server; browser client with no React or Node imports. No package root export.
-No installation, compilation, tests or examples have been executed for this draft.
+Implementation coverage: [contract table](docs/coverage.md). This revision has
+not been built or tested; external acceptance remains.
 
 ```ts
 import { connectApp } from '@pioneer/app-sdk/client';
@@ -18,13 +19,21 @@ unsubscribe();
 app.dispose();
 ```
 
-`connectApp` resolves immediately. Theme starts at null. It listens only to the
-parent window, including opaque-origin WebViews. Install before load to receive
-the shell's existing theme message. Outside Pioneer no theme is synthesized.
+`connectApp` installs its listener synchronously before its promise is awaited.
+Call it during browser module initialization, before iframe load or the dev
+page's DOMContentLoaded. SSR imports are safe; connecting requires a browser.
+Theme starts null. Iframes accept the parent window, including opaque origins;
+direct dev pages accept their own window with exact origin matching. subscribe
+immediately delivers an already known palette, then future updates. Connections
+are independent and disposable. There is no handshake or resend request: a late
+connection cannot recover a missed message. Theme grants no backend authority.
+SDK does not mutate DOM/styles; applications apply data via their own state.
 URL methods return strings, reject external/protocol-relative/traversal paths,
 and interpret a leading slash relative to the configured view root. A base URL
 is required (explicit option or HTML base element), including outside Pioneer.
 No cookies/localStorage are used. Never put server configuration in browser code.
+For a direct root dev server use `connectApp({baseUrl:'/'})`; for mounted paths
+use the explicit mount root or base href. There is no process.env mode switch.
 
 ```ts
 import { createAppServerContext, nodeRequestHeaders } from '@pioneer/app-sdk/server';
@@ -63,6 +72,12 @@ await terminal.close(); // Destroys process.
 await app.close(); // Destroys remaining owned PTYs and releases transport.
 ```
 
+Handles also provide `read({after,signal?})` for bounded legacy snapshots,
+`keepalive({signal?})` for explicit maintenance and `onChanged(listener)` for
+legacy invalidation hints. Gateway suppresses changed after any stream subscribe
+on the connection. read does not ACK a stream. `frame.streamId` identifies replay
+generations so an adapter can discard old queued receipts and trim accepted data.
+
 The application must authorize access to handles; user identity does not cause
 Gateway PTY impersonation. One context is shared by a backend execution, while
 client themes belong to individual views. Use `PioneerError.code` and `source`
@@ -82,17 +97,25 @@ limits, retry, ACK, replay, cancellation and ownership semantics.
 Prepared commands for a later authorized review environment:
 
 - Install dependencies using npm (creates a lockfile; none generated here).
-- `npm run build`: emit ESM, declarations/maps in dist using TypeScript.
+- `npm run build`: emit ESM/CJS, declarations/maps and the CJS package marker.
 - `npm run typecheck`: compilation checks without emit.
 - `npm test`: Node test runner through tsx, source tests without a build.
+- `npm run test:package`: import/require acceptance of the already built package.
 
-There are no lifecycle hooks and no CJS/root export. Runtime dependency `ws`
+There are no lifecycle hooks or package-root export. Runtime dependency `ws`
 is server-only; TypeScript/tsx/types are development dependencies. Browser
 bundlers must select the explicit client entry. Exports point at build output;
-a source checkout must be built before importing by package name. Examples
+a source checkout must be built before importing by package name. Sources are
+included for source/declaration maps. Examples
 are snippets, not a runnable demonstration application.
 
-This is ready for external review, not a claim of verified compilation or
-runtime compatibility. Streaming has no capability subversion on Gateway;
+See [Terminal integration](docs/terminal-integration.md) for a relative tarball
+dependency compatible with its CJS server and physical-root packaging rules,
+both locally and in CI without a neighboring checkout. Direct dev UI does not
+provision backend Host API authority; Terminal's local backend remains separate.
+
+Current-contract implementation is complete by source audit; compilation,
+package tracing and runtime acceptance require external verification.
+Streaming has no capability subversion on Gateway;
 older `host.pty` implementations may reject subscribe. New dev registration,
 Terminal integration and future Python/Rust implementations are out of scope.

@@ -680,3 +680,68 @@ test('barrier propagates pre-send failure and removes its abandoned request wait
     await barrier(active, p.calls);
   } finally { await p.close(); }
 });
+
+test('legacy snapshots, change hints and explicit keepalive do not consume output credit', { timeout: 5000 }, async t => {
+  const p = await peer(t, { manualKeepalive: true });
+  try {
+    const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
+    const heads = channel<{ start: number; end: number }>(t);
+    const off = terminal.onChanged(head => heads.push(head));
+    const reading = terminal.read({ after: 7 });
+    const request = await p.calls.next();
+    assert.equal(request.method, 'host.pty.read');
+    reply(request, { bytes: [65, 66], next: 9, end: 12, exit_status: null, failed: false, input_sequence: 0 });
+    const snapshot = await reading;
+    assert.deepEqual([...snapshot.bytes], [65, 66]);
+    assert.equal(snapshot.after, 7); assert.equal(snapshot.next, 9); assert.equal(snapshot.end, 12);
+    request.socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'host.pty.changed', params: {
+      sessions: [{ session_id: terminal.id, start: 7, end: 12, exit_status: null, failed: false }],
+    } }));
+    assert.equal((await heads.next()).end, 12);
+    off();
+    const keeping = terminal.keepalive();
+    const heartbeat = await p.calls.next(); assert.equal(heartbeat.method, 'host.pty.keepalive');
+    reply(heartbeat, { alive: true }); await keeping;
+    assert.equal(p.requests.filter(r => r.method === 'host.pty.ack').length, 0);
+    const resizing = terminal.resize({ cols: 100, rows: 28, pixelWidth: 900, pixelHeight: 600 });
+    const resize = await p.calls.next();
+    assert.deepEqual(resize.params.dimensions, { cols: 100, rows: 28, pixel_width: 900, pixel_height: 600 });
+    reply(resize, { resized: true }); await resizing;
+  } finally { await p.close(); }
+});
+
+test('subscribe response immediately followed by transport failure uses bounded recovery, not a new shell', { timeout: 5000 }, async t => {
+  const p = await peer(t);
+  const emit = WebSocket.prototype.emit;
+  let interrupt = true;
+  t.mock.method(WebSocket.prototype, 'emit', function(this: WebSocket, event: string | symbol, ...args: any[]) {
+    const result = emit.call(this, event, ...args);
+    if (event === 'message' && interrupt) {
+      const message = JSON.parse(args[0].toString());
+      if (message.result?.subscribed === true) {
+        interrupt = false;
+        // A receive-stack transport error fences the reply before its Promise
+        // continuation; the real SDK error handler terminates the real socket.
+        emit.call(this, 'error', new Error('Injected receive-stack disconnect'));
+      }
+    }
+    return result;
+  });
+  try {
+    const terminal = await p.app.host.pty.create({ cols: 80, rows: 24 });
+    const frames = channel<OutputFrame>(t), errors: unknown[] = [];
+    const opening = terminal.subscribe({ onOutput: frame => frames.push(frame), onError: error => errors.push(error) });
+    const first = await p.calls.next(); reply(first, { subscribed: true, window: 65536 });
+    const replacement = await p.calls.next();
+    assert.equal(replacement.method, 'host.pty.subscribe');
+    assert.notEqual(replacement.params.stream_id, first.params.stream_id);
+    reply(replacement, { subscribed: true, window: 65536 });
+    const sub = await opening;
+    output(replacement, 0, [65]);
+    const frame = await frames.next();
+    assert.equal(frame.streamId, replacement.params.stream_id);
+    assert.equal(sub.cursor, 0);
+    assert.equal(p.requests.filter(r => r.method === 'host.pty.create').length, 1);
+    assert.deepEqual(errors, []);
+  } finally { await p.close(); }
+});

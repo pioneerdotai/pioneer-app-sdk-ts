@@ -9,7 +9,8 @@ import { failure } from "../error.js";
 export { PioneerError } from "../error.js";
 export type { Bootstrap, ServerOptions } from "./config.js";
 export type { OperationOptions } from "./transport.js";
-export type { Dimensions, CreatePtyOptions, OutputFrame, OutputSubscription, SubscribeOptions } from "./pty.js";
+export type { Dimensions, CreatePtyOptions, ReadPtyOptions, OutputFrame, OutputSubscription, SubscribeOptions } from "./pty.js";
+export type { PtyHead, PtySnapshot } from "./output.js";
 export type { Pty } from "./pty.js";
 
 /** Return undefined for missing or duplicate fields. Header names are lowercase. */

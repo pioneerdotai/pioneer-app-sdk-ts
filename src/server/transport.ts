@@ -2,6 +2,8 @@ import { WebSocket } from "ws";
 import { randomBytes } from "node:crypto";
 import { failure, hostFailure, PioneerError } from "../error.js";
 import type { Bootstrap } from "./config.js";
+import { decodeHeads } from "./output.js";
+import type { PtyHead } from "./output.js";
 
 export interface OperationOptions { signal?: AbortSignal }
 export class Transport {
@@ -10,8 +12,10 @@ export class Transport {
   #opening: Promise<WebSocket> | null = null;
   #closed: PioneerError | null = null;
   #waiting = 0;
+  #generation = 0;
   #pending = new Map<string, { socket: WebSocket; reject(error: PioneerError): void; resolve(value: unknown): void }>();
   readonly outputs = new Map<string, (value: unknown) => void>();
+  readonly changes = new Map<string, (head: PtyHead) => void>();
   readonly disconnects = new Set<() => void>();
   constructor(host: Bootstrap["host_api"]) { this.#host = host; }
   async #connect(): Promise<WebSocket> {
@@ -31,7 +35,7 @@ export class Transport {
         if (disconnected) return;
         disconnected = true;
         const current = this.#socket === socket;
-        if (current) this.#socket = null;
+        if (current) { this.#socket = null; this.#generation++; }
         reject(this.#closed ?? failure("sdk.disconnected"));
         for (const call of [...this.#pending.values()]) {
           if (call.socket === socket) call.reject(this.#closed ?? failure("sdk.delivery_unknown"));
@@ -66,6 +70,8 @@ export class Transport {
           } else if (m.method === "host.pty.output") {
             if (!m.params || typeof m.params.session_id !== "string") throw new Error();
             this.outputs.get(m.params.session_id)?.(m.params);
+          } else if (m.method === "host.pty.changed") {
+            for (const { id, head } of decodeHeads(m.params)) this.changes.get(id)?.(head);
           }
         } catch { this.reset(); }
       });
@@ -135,6 +141,7 @@ export class Transport {
   reset() {
     const socket = this.#socket;
     this.#socket = null;
+    this.#generation++;
     for (const call of [...this.#pending.values()]) if (call.socket === socket) call.reject(failure("sdk.delivery_unknown"));
     socket?.terminate();
     if (!this.#closed) queueMicrotask(() => { for (const listener of this.disconnects) listener(); });
@@ -144,10 +151,12 @@ export class Transport {
     this.#closed = error;
     for (const call of [...this.#pending.values()]) call.reject(error);
     this.outputs.clear();
+    this.changes.clear();
     this.reset();
     for (const listener of this.disconnects) listener();
     this.disconnects.clear();
     this.#host = null;
   }
   get closedError() { return this.#closed; }
+  get generation() { return this.#generation; }
 }

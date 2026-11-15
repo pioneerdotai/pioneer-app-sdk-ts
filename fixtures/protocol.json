@@ -26,5 +26,15 @@
   "cursor_expired": {
     "jsonrpc": "2.0", "id": "request_fixture_00001",
     "error": { "code": -32001, "message": "host.output_cursor_expired" }
+  },
+  "read_response": {
+    "jsonrpc": "2.0", "id": "request_fixture_00002",
+    "result": { "bytes": [65, 66], "next": 9, "end": 12,
+      "exit_status": null, "failed": false, "input_sequence": 0 }
+  },
+  "changed": {
+    "jsonrpc": "2.0", "method": "host.pty.changed",
+    "params": { "sessions": [{ "session_id": "session-1", "start": 7,
+      "end": 12, "exit_status": null, "failed": false }] }
   }
 }

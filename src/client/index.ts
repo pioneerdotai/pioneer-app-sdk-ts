@@ -17,6 +17,7 @@ export interface ConnectAppOptions {
 export interface AppClient {
   readonly theme: {
     readonly current: Readonly<Theme> | null;
+    /** Delivers current synchronously if known, then future updates. */
     subscribe(listener: (theme: Readonly<Theme>) => void): () => void;
   };
   url(path: string): string;
@@ -42,8 +43,12 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
   let current: Readonly<Theme> | null = null;
   const listeners = new Set<(theme: Readonly<Theme>) => void>();
   const receive = (event: MessageEvent) => {
-    if (disposed || window.parent === window || event.source !== window.parent) return;
-    // Origin may be opaque in native shells: source window is the authority.
+    if (disposed) return;
+    if (window.parent === window) {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+    } else if (event.source !== window.parent) return;
+    // Embedded origin may be opaque; direct dev views use self + exact origin.
+    // A theme message never authenticates a user or a backend request.
     const data = event.data;
     if (!data || data.type !== "pioneer.theme" || !data.palette) return;
     const value = data.palette;
@@ -54,6 +59,8 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     }
     current = Object.freeze({ appearance: value.appearance, ...Object.fromEntries(colors.map(key => [key, value[key]])) }) as Readonly<Theme>;
     for (const listener of [...listeners]) {
+      if (disposed) break;
+      if (!listeners.has(listener)) continue;
       try { listener(current); } catch { /* One consumer cannot block others. */ }
     }
   };
@@ -75,6 +82,9 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
       subscribe(listener: (theme: Readonly<Theme>) => void) {
         if (disposed) throw failure("sdk.closed");
         listeners.add(listener);
+        if (current) {
+          try { listener(current); } catch { /* Match update delivery isolation. */ }
+        }
         return () => { listeners.delete(listener); };
       },
     }),

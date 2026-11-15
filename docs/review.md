@@ -126,3 +126,84 @@ No sleeps or larger timeouts were introduced. No dependencies, tests, builds,
 type checks, linters, applications or executable checks were run in this pass.
 Whether the complete suite now passes and exits normally remains for external
 validation; neither outcome is claimed here.
+
+## Current-contract completion (baseline ec409bb)
+
+Source audit re-read SDK implementations, Terminal server.ts, dev-server.ts,
+lib/gateway-host.ts, lib/host-theme.ts, lib/terminal-sessions.ts, app/layout.tsx,
+package.json and scripts/pioneer/{build,trace-runtime}.mjs. Read Pioneer
+crates/desktop-apps/src/lib.rs, crates/gateway/src/host_api/{mod,pty,stream}.rs,
+message/apps/runtime.rs and transport/http/apps.rs. docs/coverage.md records the
+before/after contract matrix; neither prior reports nor tests substitute for it.
+Working tree was clean; work continues on a new feat/complete-app-contract branch.
+Also re-read message/apps/{dev,ui}.rs: direct dev URLs are durable authoring
+registrations, with no backend execution bootstrap/Host credential in their view
+response. Installed bootstrap issuance remains in runtime.rs.
+
+Client block review: direct dev uses self+origin, iframe uses parent source;
+no environment switch, authority, DOM/hydration mutation, auto-connect on SSR,
+handshake or timing heuristic. Calling connectApp early installs synchronously;
+late UI subscribers get known current synchronously. Independent instances
+release only their listeners. A late *connection* cannot request missing theme.
+Explicit/base roots remain required, preserving prefix and containment.
+
+Server/PTY block review: Gateway admits exactly eight RPC operations and two
+notification kinds; public read/keepalive/onChanged now complete that surface.
+Legacy heads are hints, not EOF or reliable delivery; after streaming Gateway
+suppresses changed globally on that connection. Snapshot reads never ACK input
+or output. streamId is the existing wire identity, suitable for consumer replay
+queue fencing; receipt ACK remains explicit. Added generation check after the
+subscribe response: if the same receive stack reports a disconnect, the initial
+or replacement watch must use its finite retry budget instead of returning a
+now-dead subscription. Initial watch serializes with recovery, sharing that
+budget. No reconnect creates a PTY or resends arbitrary input. Existing unknown
+create/failed close accounting, unsubscribe isolation, bounded ACK/input windows,
+leases and revocation remain in place.
+
+Packaging block review: Terminal leaves dependencies external in server.cjs and
+rejects physical paths outside its root. Added CJS output plus a static package
+marker copied only by the explicit build command; import/require export branches
+have matching declarations. ESM remains available and client dependency graph
+contains only browser code + shared errors. No new runtime dependency, generated
+code, vendoring or library patch. Maps resolve through packaged source. An
+installed tarball with relative vendor dependency/consumer lock avoids links and
+neighbor-checkout requirements. No publication or consumer edit is performed.
+The source dependency lock is not fabricated: release toolchain locking and
+actual Terminal trace/build acceptance remain external steps.
+
+Prepared regression scope: direct/iframe source validation, early messages and
+late subscribers, repeated/disposed connections, explicit/base URLs, inert SSR
+import; snapshot/legacy hints/explicit keepalive without implicit ACK; pixel
+resize and immediate subscribe-response transport failure; built ESM/require
+exports and absence of a root entry. Existing multi-PTY, slow-consumer, ACK burst,
+replay, cancellation and cleanup cases are retained, not duplicated. Test-audit
+is applied only to the subsequent test-only pass with implementation staged as
+its read-only baseline. No new execution result is asserted.
+
+Final completion review: reviewed the complete staged implementation diff and
+new tests without running them. The test-only pass preserved the implementation
+baseline (empty unstaged source/config/doc diff); it ended before final source
+corrections. Those corrections stop remaining callbacks when a consumer disposes
+its view/PTY during dispatch, validate resize's resized:true response, and align
+stream exit-status bounds with the existing u32 wire value. Re-read those paths
+and the watch-generation/ACK interaction after correction. No duplicate service,
+transport or app-local PTY was introduced. The shared client graph remains free
+of Node/ws/server configuration; only server output/transport gained Host methods.
+
+Remaining platform limits are concrete: desktop-apps/src/lib.rs:410-453 has only
+postMessage sends, no palette request handler; late connects therefore cannot
+force initial theme delivery. host_api/stream.rs:45-120 has no unsubscribe method;
+credit withholding plus replacement/close is the existing bounded solution.
+host_api/mod.rs:175 rejects Origin and requires execution Bearer authority; a
+registered dev URL cannot become an authorized local Host backend. No capability
+subversion, process-cwd event, exactly-once downstream display or unknown-PTY
+lookup exists in this Host contract. These limits and the consumer's replay
+acceptance responsibilities are explicit in the contract/integration documents.
+
+Source-level completion covers the current app surface; it is not evidence of
+successful compilation, package emission, dependency trace or live integration.
+Not run: dependency installation/updates, tests (including the separate package
+acceptance suite), ESM/CJS builds, TypeScript/type checks, linters, formatting
+checks, npm pack/publish, applications, Gateway, dev servers, cargo checks/builds/
+clippy, generators or indirect executable verification. External reviewers must
+perform the approved build/test/pack/consumer-trace acceptance next.
