@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -25,11 +26,18 @@ jobs:
         with:
           bun-version: '1.4.3'
       - run: bun install --frozen-lockfile --ignore-scripts
-      - name: Assign main build version
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          base_version=$(node -p "require('./package.json').version")
-          npm version "${base_version}-main.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" --no-git-tag-version --ignore-scripts --package-lock=false
+          package_version=$(node -p "require('./package.json').version")
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Release tags must use vX.Y.Z (for example v0.1.1).' >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v${package_version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}." >&2
+            exit 1
+          fi
       - run: bun run build
       - run: bun run test
       - run: bun run test:package
@@ -45,7 +53,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -71,9 +79,4 @@ jobs:
             echo 'GitHub did not provide OIDC credentials; id-token: write is required.' >&2
             exit 1
           fi
-          tag=main
-          main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
-          if [ "$main_sha" = "$GITHUB_SHA" ]; then tag=latest; fi
-          npm publish ./release-package/*.tgz --ignore-scripts --access public --tag "$tag" --registry=https://registry.npmjs.org --loglevel=verbose
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm publish ./release-package/*.tgz --ignore-scripts --access public --tag latest --registry=https://registry.npmjs.org

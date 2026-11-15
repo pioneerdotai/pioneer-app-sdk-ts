@@ -10,20 +10,38 @@ does not alter Terminal's already installed local archive.
 ## Workflow
 
 `.github/workflows/package.yml` builds ESM/CJS on pull requests targeting main,
-runs source tests and built-package acceptance tests, and saves the npm archive.
-Pushes to main, including merged PRs, perform those checks and then publish the
-tested archive. Publication uses npm Trusted Publishing through GitHub Actions
-OIDC, not a stored npm token. Only the main-only publish job has id-token:write.
-Pull requests and manual workflow runs do not publish. npm 11.21.0 is installed
+pushes/merges to main, and release tags. It runs source tests and built-package
+acceptance tests and saves the npm archive. Only pushing a release tag such as
+`v0.1.1` publishes that tested archive. Publication uses npm Trusted Publishing
+through GitHub Actions OIDC, not a stored npm token. Only the tag-only publish
+job has id-token:write. Branch pushes, PRs and manual workflow runs do not publish.
+npm 11.21.0 is installed
 in that job explicitly, and satisfies the OIDC minimum version. No NODE_AUTH_TOKEN,
 NPM_TOKEN, personal GitHub token or GitHub Packages access is needed.
 
-Every main push receives a unique version such as `0.1.0-main.42.1`: the base
-version from package.json, workflow run number and attempt. The workflow does
-not commit version changes or create tags. These are continuous main builds.
-A successful build of the current main head updates npm's `latest` tag. Older
-or superseded runs publish under the `main` tag without changing latest. A
-retry gets a new attempt suffix. Both entry points are in the same archive.
+The version comes directly from package.json, and the tag must exactly match
+`v` plus that version. Only stable `vX.Y.Z` tags are supported; malformed or
+mismatched tags fail before compilation. There are no generated main versions,
+automatic version commits or automatic Git tags. Both entry points are in the
+same archive, published publicly under npm's `latest` tag. A published version
+cannot be replaced; use a new version and tag for the next release.
+
+## Release a version
+
+1. Change package.json's version to the next release, for example `0.1.1`, in
+   a PR and merge it to main. Other PRs may be merged before releasing.
+2. Tag the desired main commit and push that tag:
+
+   ```sh
+   git fetch origin
+   git tag v0.1.1 origin/main
+   git push origin v0.1.1
+   ```
+
+3. Actions validates the version, builds, tests, packs and publishes `0.1.1`.
+   Do not move an existing release tag. Rerunning a failed publish can reuse
+   the tag if that version has not reached npm; an already published version
+   cannot be published again.
 
 ## One-time maintainer setup
 
@@ -43,8 +61,8 @@ retry gets a new attempt suffix. Both entry points are in the same archive.
 
    Complete the browser/2FA prompts. This creates the initial source version,
    currently 0.1.0. Do not create a reusable publish token or store one in GitHub.
-   If using an already packed archive, publish that reviewed archive explicitly;
-   then rerun all CI jobs, not only the publish job, to generate a fresh version.
+   If using an already packed archive, publish that reviewed archive explicitly.
+   The first automated release must use a new version and matching tag.
    Skip this step if you already manage this package on npm.
 3. Put `.github/workflows/package.yml` and the SDK source in the GitHub repository.
    In npmjs.com → app-sdk → Settings → Trusted publishing, add GitHub Actions:
@@ -57,20 +75,19 @@ retry gets a new attempt suffix. Both entry points are in the same archive.
    | Environment name | Leave empty; this workflow uses no GitHub environment |
    | Allowed actions | Enable direct `npm publish`, not only staging |
 
-4. Merge a PR to main, or rerun all jobs of a failed main run, within two days
+4. Push a new release tag, or rerun a failed tag publication, within two days
    after adding the trusted publisher. npm requires a first successful OIDC
    publication in this period to validate the repository identity; if it expires,
-   delete and recreate the connection. Once validated, later main merges publish
-   automatically. Changing the workflow filename requires a matching new npm
+   delete and recreate the connection. Once validated, later release tags publish
+   automatically; main merges only build/test. Changing the workflow filename requires a matching new npm
    trusted publisher configuration.
 5. After successful OIDC publication, set the package's Publishing access to
    **Require two-factor authentication and disallow tokens**. Trusted publishing
    continues to work. Revoke an automation token or remove an NPM_TOKEN secret
    only if one was previously created for this SDK and is no longer used.
 
-No repository secrets need to be added. GITHUB_TOKEN is supplied by GitHub and
-only reads the current main commit to prevent older builds replacing latest.
-The npm publish credential is short-lived and obtained through OIDC. For a public
+No repository secrets need to be added. The npm publish credential is short-lived
+and obtained through OIDC. For a public
 package from this public repository, npm also generates provenance automatically.
 
 ## Install
