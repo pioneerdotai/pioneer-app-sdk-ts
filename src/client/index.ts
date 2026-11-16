@@ -9,6 +9,11 @@ export interface Theme {
   readonly border: string;
   readonly accent: string;
   readonly "accent-foreground": string;
+  /** Semantic status colors; absent on older Pioneer hosts. */
+  readonly success?: string;
+  readonly warning?: string;
+  readonly danger?: string;
+  readonly info?: string;
 }
 export interface ConnectAppOptions {
   /** Exact grant root, absolute or relative to document URL; must end in /. */
@@ -86,7 +91,16 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     for (const key of colors) {
       if (typeof value[key] !== "string" || value[key].length > 128 || !CSS.supports("color", value[key])) return;
     }
-    current = Object.freeze({ appearance: value.appearance, ...Object.fromEntries(colors.map(key => [key, value[key]])) }) as Readonly<Theme>;
+    const statusColors = ["success", "warning", "danger", "info"] as const;
+    for (const key of statusColors) {
+      if (value[key] !== undefined &&
+          (typeof value[key] !== "string" || value[key].length > 128 || !CSS.supports("color", value[key]))) return;
+    }
+    current = Object.freeze({
+      appearance: value.appearance,
+      ...Object.fromEntries(colors.map(key => [key, value[key]])),
+      ...Object.fromEntries(statusColors.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
+    }) as Readonly<Theme>;
     for (const listener of [...listeners]) {
       if (disposed) break;
       if (!listeners.has(listener)) continue;

@@ -38,7 +38,11 @@ view URL, never execution credentials.
 The iframe parent, or the direct dev page's own window, posts
 {type:'pioneer.theme',palette:{appearance,background,foreground,
 muted,border,accent,'accent-foreground'}}. appearance is light/dark; colors are
-valid CSS colors of at most 128 characters. Embedded pages check source===parent
+valid CSS colors of at most 128 characters. Optional `success`, `warning`, `danger`
+and `info` tokens carry the active desktop theme's semantic status colors. A
+present status token must obey the same CSS color validation. Older palettes
+without these fields remain valid; the SDK preserves absence instead of inventing
+colors. Embedded pages check source===parent
 without demanding a non-opaque origin. Top-level pages check source===window AND
 origin===location.origin. Theme is public styling data, never an identity proof.
 No environment variable, handshake or ready event is involved. Import is inert

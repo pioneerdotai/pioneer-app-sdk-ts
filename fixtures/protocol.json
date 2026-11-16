@@ -15,7 +15,8 @@
     "type": "pioneer.theme",
     "palette": {
       "appearance": "dark", "background": "#111111", "foreground": "#eeeeee",
-      "muted": "#999999", "border": "#333333", "accent": "#4488ff", "accent-foreground": "#ffffff"
+      "muted": "#999999", "border": "#333333", "accent": "#4488ff", "accent-foreground": "#ffffff",
+      "success": "#22aa66", "warning": "#dd8800", "danger": "#dd3344", "info": "#3399dd"
     }
   },
   "output": {

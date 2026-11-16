@@ -76,6 +76,10 @@ immediately delivers an already known palette, then future updates. Connections
 are independent and disposable. There is no handshake or resend request: a late
 connection cannot recover a missed message. Theme grants no backend authority.
 SDK does not mutate DOM/styles; applications apply data via their own state.
+`theme.current` and subscriptions include the host's semantic `success`, `warning`,
+`danger` and `info` colors when supplied. Use these for statuses rather than the
+ordinary accent. They are optional for compatibility with older hosts; the SDK
+validates present values but does not synthesize missing colors.
 URL methods return strings, reject external/protocol-relative/traversal paths,
 and interpret a leading slash relative to the configured view root. A base URL
 is required (explicit option or HTML base element), including outside Pioneer.

@@ -81,6 +81,34 @@ test('production iframe preserves root URLs and trusts only the parent theme sou
   } finally { app.dispose(); }
 });
 
+test('semantic theme tokens are preserved and validated without rejecting older host palettes', async t => {
+  const { connectApp } = await import('../src/client/index.js');
+  const b = browser(t, true, '../');
+  const app = await connectApp();
+  try {
+    let updates = 0;
+    app.theme.subscribe(() => { updates++; });
+    const legacy = { ...fixture.theme.palette };
+    for (const key of ['success', 'warning', 'danger', 'info']) delete legacy[key];
+    b.send(b.parent, { type: 'pioneer.theme', palette: legacy });
+    assert.equal(updates, 1);
+    assert.equal('success' in app.theme.current!, false);
+    b.send(b.parent, fixture.theme);
+    assert.deepEqual({
+      success: app.theme.current?.success, warning: app.theme.current?.warning,
+      danger: app.theme.current?.danger, info: app.theme.current?.info,
+    }, { success: '#22aa66', warning: '#dd8800', danger: '#dd3344', info: '#3399dd' });
+    assert.equal(updates, 2);
+    for (const key of ['success', 'warning', 'danger', 'info']) {
+      b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, [key]: 'invalid' } });
+    }
+    b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, success: null } });
+    b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, warning: 42 } });
+    assert.equal(updates, 2);
+    assert.equal(app.theme.current?.success, '#22aa66');
+  } finally { app.dispose(); }
+});
+
 test('direct dev captures early self messages, supplies late subscribers, and isolates repeated connections', async t => {
   const { connectApp } = await import('../src/client/index.js');
   const b = browser(t, false);
