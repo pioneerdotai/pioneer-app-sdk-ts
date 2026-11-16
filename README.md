@@ -27,7 +27,7 @@ const app = await connectApp({ baseUrl: './' }); // Only for a root document!
 // For nested documents render an authenticated <base href="../.../"> or pass
 // the exact view root. Do not infer a grant token from pathname segments.
 const unsubscribe = app.theme.subscribe(theme => {
-  document.body.style.background = theme.background;
+  document.body.style.background = theme.colors.background;
 });
 const stateUrl = app.url('/state');
 const terminalUrl = app.webSocketUrl('/terminal');
@@ -70,16 +70,19 @@ not close the view.
 `connectApp` installs its listener synchronously before its promise is awaited.
 Call it during browser module initialization, before iframe load or the dev
 page's DOMContentLoaded. SSR imports are safe; connecting requires a browser.
-Theme starts null. Iframes accept the parent window, including opaque origins;
-direct dev pages accept their own window with exact origin matching. subscribe
-immediately delivers an already known palette, then future updates. Connections
-are independent and disposable. There is no handshake or resend request: a late
-connection cannot recover a missed message. Theme grants no backend authority.
-SDK does not mutate DOM/styles; applications apply data via their own state.
-`theme.current` and subscriptions include the host's semantic `success`, `warning`,
-`danger` and `info` colors when supplied. Use these for statuses rather than the
-ordinary accent. They are optional for compatibility with older hosts; the SDK
-validates present values but does not synthesize missing colors.
+Theme starts null. SDK 0.2 exposes the complete native theme through
+`app.theme.current` and `app.theme.subscribe`: `mode`, all resolved `colors`,
+`light_theme`, `dark_theme`, fonts, radii, tokens, highlighting and other settings.
+For example, use `theme.colors.success`, `theme.colors.tab_bar`, or
+`theme.dark_theme.colors["base.blue.light"]`. The whole nested snapshot is cloned
+and deep-frozen, including unknown future fields; it is never reduced to a list
+of selected keys. See [all fields and the 0.1 migration](docs/theme.md).
+
+Iframes accept their parent, including opaque origins; direct pages require self
+and exact origin. Late subscribers receive the current snapshot immediately.
+Connections are independent and disposable. No theme handshake/resend request or
+DOM/style mutation is performed. Theme grants no backend authority. SDK 0.2
+requires the updated Desktop theme bridge; old flat `palette` messages are ignored.
 URL methods return strings, reject external/protocol-relative/traversal paths,
 and interpret a leading slash relative to the configured view root. A base URL
 is required (explicit option or HTML base element), including outside Pioneer.
