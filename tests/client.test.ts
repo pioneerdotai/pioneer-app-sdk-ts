@@ -27,7 +27,7 @@ function browser(t: TestContext, embedded: boolean, base?: string) {
   Object.defineProperty(globalThis, 'document', { configurable: true, value: Object.freeze({
     querySelector: () => base === undefined ? null : { getAttribute: () => base },
   }) });
-  Object.defineProperty(globalThis, 'CSS', { configurable: true, value: { supports: (_property: string, color: string) => /^#[0-9a-f]{6}$/.test(color) } });
+  Object.defineProperty(globalThis, 'CSS', { configurable: true, value: { supports: (_property: string, color: string) => /^#[0-9a-f]{6}([0-9a-f]{2})?$/.test(color) } });
   t.after(() => {
     try { assert.equal(listeners.size, 0, 'all view listeners must be disposed'); }
     finally {
@@ -68,44 +68,81 @@ test('production iframe preserves root URLs and trusts only the parent theme sou
     const off = app.theme.subscribe(() => { updates++; });
     b.send({}, fixture.theme, b.target.location.origin);
     b.send(b.target, fixture.theme, b.target.location.origin);
-    b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, accent: 'invalid' } });
+    b.send(b.parent, { type: 'pioneer.theme', theme: { ...fixture.theme.theme, colors: { ...fixture.theme.theme.colors, primary: 'invalid' } } });
     assert.equal(updates, 0);
     b.send(b.parent, fixture.theme); // Opaque origin is allowed for the parent.
-    assert.equal(app.theme.current?.appearance, 'dark');
+    assert.equal(app.theme.current?.mode, 'dark');
     assert.equal(updates, 1);
     off(); b.send(b.parent, fixture.theme);
     assert.equal(updates, 1);
-    app.dispose(); b.send(b.parent, { ...fixture.theme, palette: { ...fixture.theme.palette, appearance: 'light' } });
-    assert.equal(app.theme.current?.appearance, 'dark');
+    app.dispose(); b.send(b.parent, { ...fixture.theme, theme: { ...fixture.theme.theme, mode: 'light' } });
+    assert.equal(app.theme.current?.mode, 'dark');
     assert.throws(() => app.url('/state'), { code: 'sdk.closed' });
   } finally { app.dispose(); }
 });
 
-test('semantic theme tokens are preserved and validated without rejecting older host palettes', async t => {
+test('full theme snapshots preserve both modes, rare keys, structured tokens and future fields immutably', async t => {
+  const { connectApp } = await import('../src/client/index.js');
+  const b = browser(t, true, '../');
+  const app = await connectApp();
+  try {
+    const snapshot = structuredClone(fixture.theme.theme);
+    snapshot.future_section = { nested: [{ role: 'custom', scale: 2.5, enabled: true, optional: null }] };
+    b.send(b.parent, { type: 'pioneer.theme', theme: snapshot });
+    assert.deepEqual(app.theme.current, snapshot);
+    assert.notEqual(app.theme.current, snapshot);
+    assert.equal(app.theme.current?.colors.chart_grid, '#665544ff');
+    assert.equal(app.theme.current?.light_theme.colors['base.blue.light'], '#99bbff');
+    assert.equal(app.theme.current?.dark_theme['font.size'], 16);
+    assert.equal(app.theme.current?.mono_font_family, 'Menlo');
+    assert.equal(app.theme.current?.radius_lg, 8);
+    assert.ok(Object.isFrozen(app.theme.current?.colors));
+    assert.ok(Object.isFrozen(app.theme.current?.dark_theme.colors));
+    assert.ok(Object.isFrozen(app.theme.current?.tokens.background.background));
+    const current = app.theme.current as unknown as { colors: { background: string } };
+    assert.throws(() => { current.colors.background = '#ffffff'; }, TypeError);
+    snapshot.colors.background = '#ffffff';
+    snapshot.future_section.nested[0].scale = 100;
+    assert.equal(app.theme.current?.colors.background, '#111111ff');
+    assert.deepEqual(app.theme.current?.future_section, {
+      nested: [{ role: 'custom', scale: 2.5, enabled: true, optional: null }],
+    });
+    const modes: string[] = [];
+    app.theme.subscribe(theme => { modes.push(theme.mode); });
+    assert.deepEqual(modes, ['dark']);
+    b.send(b.parent, { type: 'pioneer.theme', theme: { ...fixture.theme.theme, mode: 'light' } });
+    assert.equal(app.theme.current?.mode, 'light');
+    assert.deepEqual(modes, ['dark', 'light']);
+    assert.deepEqual(app.theme.current?.dark_theme, fixture.theme.theme.dark_theme);
+  } finally { app.dispose(); }
+});
+
+test('partial, legacy, cyclic and oversized themes leave the last complete snapshot unchanged', async t => {
   const { connectApp } = await import('../src/client/index.js');
   const b = browser(t, true, '../');
   const app = await connectApp();
   try {
     let updates = 0;
     app.theme.subscribe(() => { updates++; });
-    const legacy = { ...fixture.theme.palette };
-    for (const key of ['success', 'warning', 'danger', 'info']) delete legacy[key];
-    b.send(b.parent, { type: 'pioneer.theme', palette: legacy });
-    assert.equal(updates, 1);
-    assert.equal('success' in app.theme.current!, false);
     b.send(b.parent, fixture.theme);
-    assert.deepEqual({
-      success: app.theme.current?.success, warning: app.theme.current?.warning,
-      danger: app.theme.current?.danger, info: app.theme.current?.info,
-    }, { success: '#22aa66', warning: '#dd8800', danger: '#dd3344', info: '#3399dd' });
-    assert.equal(updates, 2);
-    for (const key of ['success', 'warning', 'danger', 'info']) {
-      b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, [key]: 'invalid' } });
-    }
-    b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, success: null } });
-    b.send(b.parent, { type: 'pioneer.theme', palette: { ...fixture.theme.palette, warning: 42 } });
-    assert.equal(updates, 2);
-    assert.equal(app.theme.current?.success, '#22aa66');
+    const last = app.theme.current;
+    const missingColor = structuredClone(fixture.theme.theme);
+    delete missingColor.colors.chart_grid;
+    const cyclic = structuredClone(fixture.theme.theme);
+    cyclic.future_section = cyclic;
+    for (const theme of [
+      { mode: 'dark', colors: { background: '#111111' } },
+      missingColor,
+      { ...fixture.theme.theme, mode: 'unknown' },
+      { ...fixture.theme.theme, font_size: 'large' },
+      { ...fixture.theme.theme, dark_theme: { ...fixture.theme.theme.dark_theme, mode: 'light' } },
+      { ...fixture.theme.theme, colors: { ...fixture.theme.theme.colors, warning: 'invalid' } },
+      { ...fixture.theme.theme, future_section: 'x'.repeat(65537) },
+      cyclic,
+    ]) b.send(b.parent, { type: 'pioneer.theme', theme });
+    b.send(b.parent, { type: 'pioneer.theme', palette: { appearance: 'dark', background: '#111111' } });
+    assert.equal(updates, 1);
+    assert.equal(app.theme.current, last);
   } finally { app.dispose(); }
 });
 
@@ -120,11 +157,11 @@ test('direct dev captures early self messages, supplies late subscribers, and is
   const first = await connecting;
   const second = await connectApp({ baseUrl: '/tools/' });
   try {
-    assert.equal(first.theme.current?.appearance, 'dark');
+    assert.equal(first.theme.current?.mode, 'dark');
     assert.equal(second.theme.current, null);
     assert.equal(first.webSocketUrl('/terminal'), 'ws://localhost:3000/tools/terminal');
     let initial = 0;
-    first.theme.subscribe(theme => { initial++; assert.equal(theme.appearance, 'dark'); });
+    first.theme.subscribe(theme => { initial++; assert.equal(theme.mode, 'dark'); });
     assert.equal(initial, 1);
     b.send(b.target, fixture.theme, 'http://evil.test');
     b.send(b.target, fixture.theme, 'null');
@@ -132,11 +169,11 @@ test('direct dev captures early self messages, supplies late subscribers, and is
     assert.equal(second.theme.current, null);
     first.dispose();
     assert.equal(b.listenerCount, 1);
-    b.send(b.target, { ...fixture.theme, palette: { ...fixture.theme.palette, appearance: 'light' } }, b.target.location.origin);
-    assert.equal(first.theme.current?.appearance, 'dark');
-    assert.equal(second.theme.current?.appearance, 'light');
+    b.send(b.target, { ...fixture.theme, theme: { ...fixture.theme.theme, mode: 'light' } }, b.target.location.origin);
+    assert.equal(first.theme.current?.mode, 'dark');
+    assert.equal(second.theme.current?.mode, 'light');
     let received: string | undefined;
-    const off = second.theme.subscribe(theme => { received = theme.appearance; });
+    const off = second.theme.subscribe(theme => { received = theme.mode; });
     assert.equal(received, 'light');
     off(); second.dispose();
     const next = await connectApp({ baseUrl: '/tools/' });

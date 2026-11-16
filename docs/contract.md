@@ -36,25 +36,33 @@ view URL, never execution credentials.
 ## Theme
 
 The iframe parent, or the direct dev page's own window, posts
-{type:'pioneer.theme',palette:{appearance,background,foreground,
-muted,border,accent,'accent-foreground'}}. appearance is light/dark; colors are
-valid CSS colors of at most 128 characters. Optional `success`, `warning`, `danger`
-and `info` tokens carry the active desktop theme's semantic status colors. A
-present status token must obey the same CSS color validation. Older palettes
-without these fields remain valid; the SDK preserves absence instead of inventing
-colors. Embedded pages check source===parent
-without demanding a non-opaque origin. Top-level pages check source===window AND
-origin===location.origin. Theme is public styling data, never an identity proof.
-No environment variable, handshake or ready event is involved. Import is inert
-and SSR-safe; call connectApp at browser module initialization before iframe load
-(production) or DOMContentLoaded (dev). It installs its listener synchronously,
-before awaiting the returned promise. Dev injection sends at initialization and
-DOMContentLoaded; native load/theme updates may send again, but a late connection
-cannot request a resend. current starts null until a valid message. subscribe
-immediately delivers known current, then future updates. Connections own separate
-state/listeners; disposing one leaves another active. Reconnecting after disposal
-starts null. No palette is synthesized outside Pioneer. SDK never mutates DOM,
-styles or hydration markup: the application owns state and rendering.
+`{type:'pioneer.theme', theme: snapshot}`. SDK 0.2 uses the complete serialized native
+Theme, rather than 0.1's selected flat `palette`. Native names and nesting remain
+intact: `mode`, resolved `colors`, `light_theme`, `dark_theme`, `tokens`, fonts,
+radii, shadow/focus/scrollbar settings, list/sheet settings and syntax highlighting.
+`semantic_tokens` also carries the full native semantic projection. Both theme
+configs retain all theme-file keys, including nullable inherited colors and
+highlight settings. Resolved colors are CSS strings; raw config values may use
+native color names or gradients. Unknown fields and nested JSON values survive.
+
+The source is checked before decoding: embedded pages accept only their parent;
+top-level pages require self plus exact origin. The SDK validates the snapshot's
+required shape, resolved CSS colors and finite numeric settings, then clones and
+deep-freezes the entire tree without a projection whitelist. JSON is bounded to
+50,000 values, 32 nesting levels, 1 MiB of key/string characters and 64 KiB per
+string. Invalid, oversized or cyclic snapshots do not replace the last valid one.
+Theme remains public styling data, never an identity proof or backend authority.
+
+Connect during module initialization before iframe load (production) or
+DOMContentLoaded (dev). The listener installs synchronously; `current` starts null
+and late subscribers receive the known immutable snapshot immediately. Clients
+are independent; disposal removes their listeners. There is no handshake/resend,
+DOM mutation or synthesized host palette. Full snapshots update on native theme
+changes, including edits only to the inactive Light/Dark config. Native delivery
+caches snapshots on theme notifications rather than serializing them each poll.
+
+SDK 0.2 intentionally does not interpret old `palette` messages. Update Desktop
+and the SDK together. See [the complete format and migration](theme.md).
 
 ## View presentation
 

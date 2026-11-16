@@ -1,20 +1,13 @@
 import { failure } from "../error.js";
 export { PioneerError } from "../error.js";
 
-export interface Theme {
-  readonly appearance: "light" | "dark";
-  readonly background: string;
-  readonly foreground: string;
-  readonly muted: string;
-  readonly border: string;
-  readonly accent: string;
-  readonly "accent-foreground": string;
-  /** Semantic status colors; absent on older Pioneer hosts. */
-  readonly success?: string;
-  readonly warning?: string;
-  readonly danger?: string;
-  readonly info?: string;
-}
+import { decodeTheme, type Theme } from "./theme.js";
+export { THEME_COLOR_KEYS, THEME_CONFIG_COLOR_KEYS } from "./theme.js";
+export type {
+  Theme, ThemeMode, ThemeValue, ThemeObject, ThemeColorName, ThemeColors,
+  ThemeConfig, ThemeConfigColors, ThemeConfigColorName, ThemeToken,
+} from "./theme.js";
+
 export interface ConnectAppOptions {
   /** Exact grant root, absolute or relative to document URL; must end in /. */
   baseUrl?: string;
@@ -84,23 +77,10 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
       }
       return;
     }
-    if (!data || data.type !== "pioneer.theme" || !data.palette) return;
-    const value = data.palette;
-    if (value.appearance !== "dark" && value.appearance !== "light") return;
-    const colors = ["background", "foreground", "muted", "border", "accent", "accent-foreground"] as const;
-    for (const key of colors) {
-      if (typeof value[key] !== "string" || value[key].length > 128 || !CSS.supports("color", value[key])) return;
-    }
-    const statusColors = ["success", "warning", "danger", "info"] as const;
-    for (const key of statusColors) {
-      if (value[key] !== undefined &&
-          (typeof value[key] !== "string" || value[key].length > 128 || !CSS.supports("color", value[key]))) return;
-    }
-    current = Object.freeze({
-      appearance: value.appearance,
-      ...Object.fromEntries(colors.map(key => [key, value[key]])),
-      ...Object.fromEntries(statusColors.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
-    }) as Readonly<Theme>;
+    if (!data || data.type !== "pioneer.theme") return;
+    const theme = decodeTheme(data.theme);
+    if (!theme) return;
+    current = theme;
     for (const listener of [...listeners]) {
       if (disposed) break;
       if (!listeners.has(listener)) continue;
