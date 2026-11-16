@@ -35,6 +35,38 @@ unsubscribe();
 app.dispose();
 ```
 
+Inside Pioneer Desktop, move the current application view without reloading it:
+
+```ts
+await app.view.setPlacement('fullscreen');
+await app.view.setPlacement('bottom');
+await app.view.setPlacement('right');
+```
+
+`fullscreen` fills Pioneer's application area using the expanded placement; it does not change OS window fullscreen. Opening from the Apps
+page starts in this placement. The method works in installed and direct dev
+views on a Desktop version supporting the presentation bridge. It requires no
+backend credentials. Calls resolve after Desktop applies the placement; an
+unavailable host times out after five seconds (`sdk.view_timeout`). At most 16
+calls may be pending per client (`sdk.view_overloaded`); `dispose()` rejects
+remaining calls with `sdk.closed`. Invalid placement rejects with
+`sdk.invalid_placement`; a synchronous transport failure is `sdk.view_unavailable`.
+
+To close this application view:
+
+```ts
+app.view.close();
+```
+
+This closes the current presentation. The application stays installed and its
+backend remains managed by Gateway, following the Desktop view
+lifecycle. `close()` sends a request and returns `void`: it cannot acknowledge
+completion to a JavaScript context being destroyed. Save state before calling
+it. It throws `sdk.closed` after disposal or `sdk.view_unavailable` on a
+synchronous transport failure. A browser or older Desktop without the bridge
+may ignore the request. `app.dispose()` only releases the SDK client; it does
+not close the view.
+
 `connectApp` installs its listener synchronously before its promise is awaited.
 Call it during browser module initialization, before iframe load or the dev
 page's DOMContentLoaded. SSR imports are safe; connecting requires a browser.

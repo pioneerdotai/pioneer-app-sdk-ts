@@ -52,6 +52,42 @@ state/listeners; disposing one leaves another active. Reconnecting after disposa
 starts null. No palette is synthesized outside Pioneer. SDK never mutates DOM,
 styles or hydration markup: the application owns state and rendering.
 
+## View presentation
+
+Desktop exposes a per-WebView presentation bridge, independent of backend Host
+API authority. `view.setPlacement` sends a window message
+`{type:'pioneer.view.setPlacement', id, placement}` to the parent (installed
+iframe) or the same window with its exact origin (direct dev page). Placement
+is exactly `fullscreen`, `bottom` or `right`. Fullscreen fills Pioneer's app area,
+using its existing expanded placement, not OS fullscreen. Apps page opening
+defaults to fullscreen. Changing placement retains the page and its state.
+
+`view.close()` sends `{type:'pioneer.view.close', id}` through the same window
+transport. It closes only the current presentation through the existing Desktop
+view-close lifecycle, without uninstalling, deleting data, quitting Desktop
+or explicitly stopping the backend. It returns void and has no acknowledgement,
+because closing destroys the caller's JavaScript context. State should be saved
+before requesting close. An unsupported host may ignore it; synchronous
+transport errors throw `sdk.view_unavailable`, and disposal throws `sdk.closed`.
+
+Desktop accepts messages only from its own App iframe or the direct dev page's
+same-origin window. A private per-WebView 128-bit token authenticates the narrow
+native IPC hop; it is not a backend credential and is not passed to the installed
+App iframe. Only setPlacement and close are admitted. The native queue has 32 slots
+and is drained by the existing view publication refresh; revocation drops the
+queue with its WebView.
+
+Desktop acknowledges an applied request with
+`{type:'pioneer.view.result', id, placement}` through the parent/self message
+source. The SDK checks that source and (for dev) origin, then matches both ID
+and placement. IDs contain 128 random bits from getRandomValues, including in
+opaque sandbox origins. Calls time out after five seconds, never implicitly
+retry, and have a limit of 16 pending per connection. A timeout leaves the
+outcome unconfirmed; it does not guarantee that Desktop did not move the view.
+Disposal clears timers and rejects pending calls. Older Desktop versions and
+ordinary browsers have no presentation bridge; their calls time out. This
+addition does not change Gateway JSON-RPC or grant the page execution credentials.
+
 ## Host transport
 
 Backend-only WebSocket at bootstrap host_api.endpoint. Authorization: Bearer

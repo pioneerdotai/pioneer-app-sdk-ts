@@ -14,7 +14,15 @@ export interface ConnectAppOptions {
   /** Exact grant root, absolute or relative to document URL; must end in /. */
   baseUrl?: string;
 }
+/** Fullscreen fills Pioneer's application area, not the operating system screen. */
+export type AppPlacement = "fullscreen" | "bottom" | "right";
 export interface AppClient {
+  readonly view: {
+    /** Moves this open view without navigating or restarting the application. */
+    setPlacement(placement: AppPlacement): Promise<void>;
+    /** Requests closing this application view. No acknowledgement. */
+    close(): void;
+  };
   readonly theme: {
     readonly current: Readonly<Theme> | null;
     /** Delivers current synchronously if known, then future updates. */
@@ -42,6 +50,18 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
   let disposed = false;
   let current: Readonly<Theme> | null = null;
   const listeners = new Set<(theme: Readonly<Theme>) => void>();
+  const pending = new Map<string, {
+    placement: AppPlacement;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  // Available even in opaque sandbox origins (no secure-context requirement).
+  const requestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+  const postViewRequest = (message: { type: string; id: string; placement?: AppPlacement }) => {
+    const direct = window.parent === window;
+    window.parent.postMessage(message, direct ? window.location.origin : "*");
+  };
   const receive = (event: MessageEvent) => {
     if (disposed) return;
     if (window.parent === window) {
@@ -50,6 +70,15 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     // Embedded origin may be opaque; direct dev views use self + exact origin.
     // A theme message never authenticates a user or a backend request.
     const data = event.data;
+    if (data?.type === "pioneer.view.result" && typeof data.id === "string") {
+      const call = pending.get(data.id);
+      if (call && data.placement === call.placement) {
+        pending.delete(data.id);
+        clearTimeout(call.timer);
+        call.resolve();
+      }
+      return;
+    }
     if (!data || data.type !== "pioneer.theme" || !data.palette) return;
     const value = data.palette;
     if (value.appearance !== "dark" && value.appearance !== "light") return;
@@ -77,6 +106,33 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     return target.href;
   };
   return Object.freeze({
+    view: Object.freeze({
+      setPlacement(placement: AppPlacement): Promise<void> {
+        if (disposed) return Promise.reject(failure("sdk.closed"));
+        if (!["fullscreen", "bottom", "right"].includes(placement)) return Promise.reject(failure("sdk.invalid_placement"));
+        if (pending.size >= 16) return Promise.reject(failure("sdk.view_overloaded"));
+        const id = requestId();
+        return new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(failure("sdk.view_timeout"));
+          }, 5000);
+          pending.set(id, { placement, resolve, reject, timer });
+          try {
+            postViewRequest({ type: "pioneer.view.setPlacement", id, placement });
+          } catch {
+            pending.delete(id);
+            clearTimeout(timer);
+            reject(failure("sdk.view_unavailable"));
+          }
+        });
+      },
+      close(): void {
+        if (disposed) throw failure("sdk.closed");
+        try { postViewRequest({ type: "pioneer.view.close", id: requestId() }); }
+        catch { throw failure("sdk.view_unavailable"); }
+      },
+    }),
     theme: Object.freeze({
       get current() { return current; },
       subscribe(listener: (theme: Readonly<Theme>) => void) {
@@ -94,6 +150,15 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
       target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
       return target.href;
     },
-    dispose() { disposed = true; listeners.clear(); window.removeEventListener("message", receive); },
+    dispose() {
+      disposed = true;
+      listeners.clear();
+      window.removeEventListener("message", receive);
+      for (const call of pending.values()) {
+        clearTimeout(call.timer);
+        call.reject(failure("sdk.closed"));
+      }
+      pending.clear();
+    },
   });
 }

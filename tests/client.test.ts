@@ -6,9 +6,10 @@ import { readFile } from 'node:fs/promises';
 const fixture = JSON.parse(await readFile(new URL('../fixtures/protocol.json', import.meta.url), 'utf8'));
 function browser(t: TestContext, embedded: boolean, base?: string) {
   const saved = new Map(['window', 'document', 'CSS'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  const parent = {};
+  const parent = { postMessage(_message: unknown, _origin: string) {} };
   const target = Object.assign(new EventTarget(), {
-    parent: parent as object,
+    parent: parent as { postMessage(message: unknown, origin: string): void },
+    postMessage(_message: unknown, _origin: string) {},
     location: { href: 'https://gateway.test/proxy/apps/view/grant/nested/page', origin: 'https://gateway.test' },
   });
   if (!embedded) target.parent = target;
@@ -123,4 +124,70 @@ test('explicit root overrides base href while cross-origin roots fail closed', a
   const app = await connectApp({ baseUrl: '../assets/' });
   try { assert.equal(app.url('/state'), 'https://gateway.test/proxy/apps/view/grant/assets/state'); }
   finally { app.dispose(); }
+});
+
+test('view placement routes to its host and correlates trusted acknowledgements in installed and dev views', async t => {
+  const { connectApp } = await import('../src/client/index.js');
+  for (const embedded of [true, false]) {
+    await t.test(embedded ? 'installed iframe' : 'direct dev page', async t => {
+      const b = browser(t, embedded, '../');
+      const outgoing: { message: { type: string; id: string; placement?: string }; origin: string }[] = [];
+      t.mock.method(b.target.parent, 'postMessage', (message, origin) => {
+        outgoing.push({ message: message as { type: string; id: string; placement?: string }, origin });
+      });
+      const app = await connectApp();
+      try {
+        const first = app.view.setPlacement('right');
+        const second = app.view.setPlacement('fullscreen');
+        assert.equal(outgoing[0].origin, embedded ? '*' : b.target.location.origin);
+        assert.notEqual(outgoing[0].message.id, outgoing[1].message.id);
+        assert.equal(outgoing[0].message.placement, 'right');
+        let settled = false;
+        void first.then(() => { settled = true; }, () => {});
+        const response = { ...outgoing[0].message, type: 'pioneer.view.result' };
+        b.send({}, response, b.target.location.origin);
+        if (!embedded) b.send(b.target, response, 'http://evil.test');
+        const sender = embedded ? b.parent : b.target;
+        b.send(sender, { ...response, placement: 'bottom' }, b.target.location.origin);
+        await Promise.resolve();
+        assert.equal(settled, false);
+        b.send(sender, { ...outgoing[1].message, type: 'pioneer.view.result' }, b.target.location.origin);
+        await second;
+        assert.equal(settled, false);
+        b.send(sender, response, b.target.location.origin);
+        await first;
+        assert.equal(app.view.close(), undefined);
+        assert.equal(outgoing[2].message.type, 'pioneer.view.close');
+        assert.equal('placement' in outgoing[2].message, false);
+        assert.equal(outgoing[2].origin, embedded ? '*' : b.target.location.origin);
+        assert.notEqual(outgoing[2].message.id, outgoing[0].message.id);
+        await assert.rejects(app.view.setPlacement('close' as never), { code: 'sdk.invalid_placement' });
+        app.dispose();
+        await assert.rejects(app.view.setPlacement('bottom'), { code: 'sdk.closed' });
+        assert.throws(() => app.view.close(), { code: 'sdk.closed' });
+      } finally { app.dispose(); }
+    });
+  }
+});
+
+test('view requests have a finite timeout, bounded pending calls and dispose rejects outstanding work', async t => {
+  const { connectApp } = await import('../src/client/index.js');
+  const b = browser(t, false, '../');
+  t.mock.method(b.target, 'postMessage', () => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const app = await connectApp();
+  try {
+    const calls = Array.from({ length: 16 }, () => app.view.setPlacement('bottom'));
+    const timedOut = Promise.all(calls.map(call => assert.rejects(call, { code: 'sdk.view_timeout' })));
+    await assert.rejects(app.view.setPlacement('right'), { code: 'sdk.view_overloaded' });
+    t.mock.timers.tick(5000);
+    await timedOut;
+    t.mock.method(b.target, 'postMessage', () => { throw new Error('blocked'); });
+    await assert.rejects(app.view.setPlacement('right'), { code: 'sdk.view_unavailable' });
+    assert.throws(() => app.view.close(), { code: 'sdk.view_unavailable' });
+    t.mock.method(b.target, 'postMessage', () => {});
+    const closed = assert.rejects(app.view.setPlacement('right'), { code: 'sdk.closed' });
+    app.dispose();
+    await closed;
+  } finally { app.dispose(); }
 });

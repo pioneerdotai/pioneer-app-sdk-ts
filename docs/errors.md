@@ -17,6 +17,10 @@ host.operation_failed. Applications must tolerate future codes.
 | sdk.unauthorized | Missing/invalid proxy credential |
 | sdk.user_missing | No valid trusted principal after authentication |
 | sdk.capability_unavailable | Host API absent or host.pty not advertised |
+| sdk.invalid_placement | Placement is not fullscreen, bottom or right |
+| sdk.view_overloaded | Too many pending view placement requests |
+| sdk.view_timeout | Host placement acknowledgement did not arrive; outcome unconfirmed |
+| sdk.view_unavailable | View message could not be sent |
 | sdk.closed | Handle/context/transport has closed |
 | sdk.capacity | Bounded queue/window/request capacity exceeded |
 | sdk.limit | Input/request/sequence size limit exceeded |
