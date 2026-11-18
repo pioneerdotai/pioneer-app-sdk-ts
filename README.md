@@ -174,3 +174,22 @@ package tracing and runtime acceptance require external verification.
 Streaming has no capability subversion on Gateway;
 older `host.pty` implementations may reject subscribe. New dev registration,
 Terminal integration and future Python/Rust implementations are out of scope.
+
+
+### Server-side rendering
+
+Gateway installations that advertise `host.render` let the app's backend render
+PNG and PDF without bundling a browser.
+
+```ts
+const { data: png, metadata } = await app.host.render.screenshot({
+  path: "/agent-render",
+  input: { snapshot, range: "A1:H20" },
+});
+const pdf = await app.host.render.pdf({ html });
+```
+
+The screenshot page implements `window.__pioneerRender.prepare(input)` to return
+the viewport dimensions and `window.__pioneerRender.capture()` to return
+`{ clip: { x, y, width, height }, metadata }`. Gateway resolves the path in the
+current app execution. Both operations accept an optional `AbortSignal`.
