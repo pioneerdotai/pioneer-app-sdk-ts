@@ -1,4 +1,8 @@
 import { failure } from "../error.js";
+import { createProfiles, type AppProfiles } from "./profiles.js";
+export type {
+  AppProfile, AppProfiles, ProfileIdentity, ResolveProfilesOptions, ResolvedProfiles,
+} from "./profiles.js";
 export { PioneerError } from "../error.js";
 
 import { decodeTheme, type Theme } from "./theme.js";
@@ -15,6 +19,7 @@ export interface ConnectAppOptions {
 /** Fullscreen fills Pioneer's application area, not the operating system screen. */
 export type AppPlacement = "fullscreen" | "bottom" | "right";
 export interface AppClient {
+  readonly profiles: AppProfiles;
   readonly view: {
     /** Moves this open view without navigating or restarting the application. */
     setPlacement(placement: AppPlacement): Promise<void>;
@@ -56,6 +61,7 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     }
   }
   let disposed = false;
+  const lifetime = new AbortController();
   let current: Readonly<Theme> | null = null;
   const listeners = new Set<(theme: Readonly<Theme>) => void>();
   const pending = new Map<string, {
@@ -110,6 +116,7 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     return target.href;
   };
   return Object.freeze({
+    profiles: createProfiles(url, lifetime.signal),
     view: Object.freeze({
       setPlacement(placement: AppPlacement): Promise<void> {
         if (disposed) return Promise.reject(failure("sdk.closed"));
@@ -156,6 +163,7 @@ export async function connectApp(options: ConnectAppOptions = {}): Promise<AppCl
     },
     dispose() {
       disposed = true;
+      lifetime.abort();
       listeners.clear();
       window.removeEventListener("message", receive);
       for (const call of pending.values()) {

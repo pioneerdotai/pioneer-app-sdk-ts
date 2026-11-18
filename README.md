@@ -198,3 +198,21 @@ The screenshot page implements `window.__pioneerRender.prepare(input)` to return
 the viewport dimensions and `window.__pioneerRender.capture()` to return
 `{ clip: { x, y, width, height }, metadata }`. Gateway resolves the path in the
 current app execution. Both operations accept an optional `AbortSignal`.
+
+## Profiles in an open app view
+
+`app.profiles.resolve({ includeSelf: true })` returns the signed-in user's
+profile in `self`. Pass `identities: [{ type, id }]` to resolve up to 64 people
+or agents by ID. The response includes the accessible matches in `profiles`.
+Each profile has `type`, `id`, `displayName`, `nickname`, and `avatarRevision`.
+
+```ts
+const app = await connectApp()
+const { self } = await app.profiles.resolve({ includeSelf: true })
+const avatar = self ? app.profiles.avatarUrl(self) : null
+```
+
+Use the returned avatar URL with `crossorigin="anonymous"` and
+`referrerpolicy="no-referrer"`. The profile API uses the current app view
+grant in both installed and development views. Cache the results in memory
+for the lifetime of the open view.
