@@ -84,11 +84,11 @@ Connections are independent and disposable. No theme handshake/resend request or
 DOM/style mutation is performed. Theme grants no backend authority. SDK 0.2
 requires the updated Desktop theme bridge; old flat `palette` messages are ignored.
 URL methods return strings, reject external/protocol-relative/traversal paths,
-and interpret a leading slash relative to the configured view root. A base URL
-is required (explicit option or HTML base element), including outside Pioneer.
-No cookies/localStorage are used. Never put server configuration in browser code.
-For a direct root dev server use `connectApp({baseUrl:'/'})`; for mounted paths
-use the explicit mount root or base href. There is no process.env mode switch.
+and interpret a leading slash relative to the view root. For a dev app opened
+in Pioneer Desktop, call `connectApp()`. Desktop supplies the Gateway view root
+for API and WebSocket URLs. The page, assets, and hot reload use the dev server.
+Outside Pioneer, supply the base element or `baseUrl` as usual. No
+cookies/localStorage are used. Keep server configuration out of browser code.
 
 ```ts
 import { createAppServerContext, nodeRequestHeaders } from '@pioneercompany/app-sdk/server';
@@ -107,6 +107,11 @@ process. Missing bootstrap fails closed. `bootstrap`, `bootstrapPath`, `appData`
 options support explicit configuration with the same validation, not an auth
 bypass. Contexts and errors do not serialize credentials. Treat input bootstrap
 objects and environment as secrets; the SDK cannot erase caller-owned copies.
+
+With `NODE_ENV=development` and no explicit bootstrap, the server SDK reads
+`credential.json` in the project directory and uses `.pioneer-data` unless
+`APP_DATA` or `appData` is set. Run `pioneer dev app add` before starting the dev
+server and save its JSON there. Exclude the file from Git and browser assets.
 
 ```ts
 const terminal = await app.host.pty.create({ cols: 120, rows: 30,

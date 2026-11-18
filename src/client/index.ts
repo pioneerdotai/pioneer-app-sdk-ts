@@ -34,16 +34,26 @@ export interface AppClient {
 /** Resolves immediately: Pioneer has no theme handshake or readiness event. */
 export async function connectApp(options: ConnectAppOptions = {}): Promise<AppClient> {
   if (typeof window === "undefined") throw failure("sdk.browser_required");
-  // Only an explicit base element is trusted. document.baseURI alone could be
-  // an arbitrary nested document, and inferring a grant token is not a contract.
-  const configured = options.baseUrl ?? document.querySelector("base[href]")?.getAttribute("href");
+  const page = new URL(window.location.href);
+  const nativeBase = (window as Window & { __pioneerAppBaseUrl?: unknown }).__pioneerAppBaseUrl;
+  const devBase = window.parent === window && typeof nativeBase === "string" ? nativeBase : undefined;
+  const configured = options.baseUrl ?? devBase ?? document.querySelector("base[href]")?.getAttribute("href");
   if (!configured) throw failure("sdk.base_url_required");
   let root: URL;
-  try { root = new URL(configured, window.location.href); }
+  try { root = new URL(configured, page); }
   catch { throw failure("sdk.invalid_url"); }
-  if (!["http:", "https:"].includes(root.protocol) || root.origin !== new URL(window.location.href).origin ||
+  if (!["http:", "https:"].includes(root.protocol) ||
       root.username || root.password || root.search || root.hash || !root.pathname.endsWith("/")) {
     throw failure("sdk.invalid_url");
+  }
+  if (root.origin !== page.origin) {
+    const loopback = (url: URL) => url.hostname === "localhost" || url.hostname === "[::1]" ||
+      /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+    if (options.baseUrl !== undefined || configured !== devBase || page.protocol !== "http:" ||
+        !loopback(page) || !loopback(root) ||
+        !/\/storage\/app-views\/[A-Za-z0-9_-]{43}\/$/.test(root.pathname)) {
+      throw failure("sdk.invalid_url");
+    }
   }
   let disposed = false;
   let current: Readonly<Theme> | null = null;

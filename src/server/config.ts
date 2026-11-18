@@ -1,6 +1,6 @@
 import { open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
-import { failure } from "../error.js";
+import { isAbsolute, resolve } from "node:path";
+import { failure, PioneerError } from "../error.js";
 
 /** Input only: never attach this credential-bearing value to public contexts. */
 export interface Bootstrap {
@@ -11,11 +11,15 @@ export interface Bootstrap {
 }
 export interface ServerOptions { bootstrap?: unknown; bootstrapPath?: string; appData?: string }
 export async function configuration(options: ServerOptions): Promise<{ bootstrap: Bootstrap; appData: string }> {
-  const appData = options.appData ?? process.env.APP_DATA;
+  const configuredPath = options.bootstrapPath ?? process.env.PIONEER_BOOTSTRAP;
+  const development = process.env.NODE_ENV === "development"
+    && options.bootstrap === undefined && configuredPath === undefined;
+  const appData = options.appData ?? process.env.APP_DATA
+    ?? (development ? resolve(".pioneer-data") : undefined);
   if (typeof appData !== "string" || !appData || !isAbsolute(appData) || appData.includes("\0")) throw failure("sdk.invalid_app_data");
   let value = options.bootstrap;
   if (value === undefined) {
-    const path = options.bootstrapPath ?? process.env.PIONEER_BOOTSTRAP;
+    const path = development ? resolve("credential.json") : configuredPath;
     if (!path || !isAbsolute(path)) throw failure("sdk.bootstrap_missing");
     try {
       const file = await open(path, "r");
@@ -32,7 +36,13 @@ export async function configuration(options: ServerOptions): Promise<{ bootstrap
         if (length > 16384) throw failure("sdk.invalid_bootstrap");
         value = JSON.parse(buffer.subarray(0, length).toString("utf8"));
       } finally { await file.close(); }
-    } catch { throw failure("sdk.invalid_bootstrap"); }
+    } catch (error) {
+      if (development && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new PioneerError("sdk.dev_credentials_missing", "Save the JSON from pioneer dev app add as credential.json in the project root.");
+      }
+      if (development) throw invalidDevelopmentCredentials();
+      throw failure("sdk.invalid_bootstrap");
+    }
   }
   try {
     // Copy only validated fields; reject non-JSON explicit configuration too.
@@ -43,6 +53,7 @@ export async function configuration(options: ServerOptions): Promise<{ bootstrap
         typeof v.ui_proxy?.credential !== "string" || !/^[a-f0-9]{64}$/.test(v.ui_proxy.credential) ||
         (v.ui_base_path !== undefined && v.ui_base_path !== "/")) throw new Error();
     let host: Bootstrap["host_api"] = null;
+    if (development && v.host_api === null) throw new Error();
     if (v.host_api !== null) {
       const h = v.host_api;
       if (!h || typeof h.endpoint !== "string" || typeof h.credential !== "string" || !/^[a-f0-9]{64}$/.test(h.credential) ||
@@ -52,5 +63,12 @@ export async function configuration(options: ServerOptions): Promise<{ bootstrap
       host = { endpoint: url.href, credential: h.credential, capabilities: [...h.capabilities] };
     }
     return { appData, bootstrap: { execution_id: v.execution_id, ui_proxy: { credential: v.ui_proxy.credential }, host_api: host } };
-  } catch { throw failure("sdk.invalid_bootstrap"); }
+  } catch {
+    if (development) throw invalidDevelopmentCredentials();
+    throw failure("sdk.invalid_bootstrap");
+  }
+}
+
+function invalidDevelopmentCredentials() {
+  return new PioneerError("sdk.invalid_bootstrap", "Invalid credential.json. Save the JSON from pioneer dev app add again.");
 }
