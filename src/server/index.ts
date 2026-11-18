@@ -2,12 +2,14 @@ import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { configuration } from "./config.js";
 import type { ServerOptions } from "./config.js";
+import { createRender } from "./render.js";
 import { Transport } from "./transport.js";
 import { Pty } from "./pty.js";
 import type { CreatePtyOptions } from "./pty.js";
 import { failure } from "../error.js";
 export { PioneerError } from "../error.js";
 export type { Bootstrap, ServerOptions } from "./config.js";
+export type { ScreenshotOptions, PdfOptions } from "./render.js";
 export type { OperationOptions } from "./transport.js";
 export type { Dimensions, CreatePtyOptions, ReadPtyOptions, OutputFrame, OutputSubscription, SubscribeOptions } from "./pty.js";
 export type { PtyHead, PtySnapshot } from "./output.js";
@@ -21,6 +23,7 @@ export interface AppServerContext {
   readonly appData: string;
   readonly host: {
     readonly capabilities: readonly string[];
+    readonly render: ReturnType<typeof createRender>;
     readonly pty: { create(options: CreatePtyOptions): Promise<Pty> };
   };
   authenticateServiceRequest(headers: RequestHeaders): void;
@@ -44,6 +47,7 @@ export function nodeRequestHeaders(request: Pick<IncomingMessage, "rawHeaders">)
 export async function createAppServerContext(options: ServerOptions = {}): Promise<AppServerContext> {
   const { bootstrap, appData } = await configuration(options);
   const expected = Buffer.from(bootstrap.ui_proxy.credential, "ascii");
+  const lifetime = new AbortController();
   const transport = new Transport(bootstrap.host_api);
   const capabilities = Object.freeze([...(bootstrap.host_api?.capabilities ?? [])]);
   const owned = new Set<Pty>();
@@ -62,6 +66,7 @@ export async function createAppServerContext(options: ServerOptions = {}): Promi
     appData,
     host: Object.freeze({
       capabilities,
+      render: createRender(bootstrap.host_api, assertOpen, lifetime.signal),
       pty: Object.freeze({
         async create(options: CreatePtyOptions) {
           assertOpen();
@@ -93,6 +98,7 @@ export async function createAppServerContext(options: ServerOptions = {}): Promi
     close() {
       if (closing) return closing;
       stopped = true;
+      lifetime.abort();
       closing = (async () => {
         const settled = await Promise.allSettled([...creating]);
         const terminals = new Set([...owned, ...settled.flatMap(r => r.status === "fulfilled" ? [r.value] : [])]);
